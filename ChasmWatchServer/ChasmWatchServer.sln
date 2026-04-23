@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ChasmWatchServer", "ChasmWatchServer.csproj", "{9B442F59-EA08-7B17-3904-328798989E21}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9B442F59-EA08-7B17-3904-328798989E21}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9B442F59-EA08-7B17-3904-328798989E21}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9B442F59-EA08-7B17-3904-328798989E21}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9B442F59-EA08-7B17-3904-328798989E21}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {77CE1C9F-704E-4500-9A8E-A9621C86BE8C}
+	EndGlobalSection
+EndGlobal

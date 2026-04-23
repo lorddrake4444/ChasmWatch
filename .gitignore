@@ -1,0 +1,14 @@
+# Build folders (Compiled output)
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio Code workspace settings (Optional, but good if working on a team)
+.vscode/*
+
+# Visual Studio temporary files
+.vs/
+*.user
+*.suo
+
+# Mac system files (if you are on macOS)
+.DS_Store
