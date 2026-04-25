@@ -1,11 +1,11 @@
 using System.ComponentModel.DataAnnotations;
 
-public class Unit(string name, int health, int speed, List<Move>? moves = null)
+public class Unit(int health, int speed, List<Move>? moves = null) :Entity 
 {
-    [Required] public string Name { get; set; } = name;
     public int Health { get; set; } = health;
     public int Speed { get; set; } = speed;
     public List<Move>? Moves { get; set; } = moves;
+    public HexagonalPos CurrentWorldPos { get; set; } = new(0,0,0);
 }
 
 public abstract class Move(string name)

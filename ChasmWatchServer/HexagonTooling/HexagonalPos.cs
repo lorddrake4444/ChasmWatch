@@ -1,3 +1,8 @@
+public enum HexDirection
+{
+    UP, DOWN, LEFTUP, LEFTDOWN, RIGHTUP, RIGHTDOWN
+}
+
 public record class HexagonalPos
 {
     public int r { get; set; }

@@ -29,6 +29,7 @@ public class Startup
         });
         services.AddSingleton<IPlayerService, PlayerService>();
         services.AddSingleton<GameState>();
+        services.AddSingleton<WorldMap>();
     }
 
     // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -53,7 +54,7 @@ public class Startup
         app.UseEndpoints(endpoints =>
         {
             endpoints.MapControllers();
-            endpoints.MapHub<GameHub>("/chat");
+            endpoints.MapHub<ChatHub>("/chat");
         });
     }
 }
