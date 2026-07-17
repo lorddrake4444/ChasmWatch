@@ -55,6 +55,7 @@ public class Startup
         {
             endpoints.MapControllers();
             endpoints.MapHub<ChatHub>("/chat");
+            endpoints.MapHub<GameHub>("/game");
         });
     }
 }

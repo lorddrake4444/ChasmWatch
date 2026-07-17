@@ -5,9 +5,9 @@ using Microsoft.AspNetCore.SignalR;
 public class GameHub : Hub
 {
     private readonly GameState _state;
-    private readonly PlayerService _playerService;
+    private readonly IPlayerService _playerService;
 
-    public GameHub(GameState state, PlayerService playerService)
+    public GameHub(GameState state, IPlayerService playerService)
     {
         _state = state;
         _playerService = playerService;
@@ -25,14 +25,17 @@ public class GameHub : Hub
             return;
         }
         var player = _playerService.GetPlayerById(playerId);
-        if (player?.ActiveChar == null)
+/*         if (player?.ActiveChar == null)
         {
             await Clients.Caller.SendAsync("SystemMessage", "No active character.");
             return;
         }
-        Unit playerUnit = player.ActiveChar;
+        Unit playerUnit = player.ActiveChar; */
+        Unit playerUnit = new Unit(100, 1); // Temporary unit creation for testing
         await Groups.AddToGroupAsync(Context.ConnectionId, roomName);
         await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username} joined tile {roomName}");
+        if (entryDirection == null)
+            entryDirection = HexDirection.DOWN;
         WorldTile Tile = _state.AddUnitToTile(pos, entryDirection, playerUnit);
         var boardDto = Tile.Board.Values.Select(b => new
         {
@@ -56,12 +59,13 @@ public class GameHub : Hub
             return;
         }
         var player = _playerService.GetPlayerById(playerId);
-        if (player?.ActiveChar == null)
+/*         if (player?.ActiveChar == null)
         {
             await Clients.Caller.SendAsync("SystemMessage", "No active character.");
             return;
-        }
-        WorldTile? tile = _state.MoveUnit(WorldTilePos, destination, player.ActiveChar);
+        } */
+        Unit playerUnit = new Unit(100, 1); // Temporary unit creation for testing
+        WorldTile? tile = _state.MoveUnit(WorldTilePos, destination, playerUnit);
         if (tile == null)
         {
             await Clients.Caller.SendAsync("SystemMessage", "Move failed.");

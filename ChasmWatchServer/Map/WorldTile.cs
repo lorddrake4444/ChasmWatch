@@ -153,16 +153,32 @@ public class WorldTile
         _lock.EnterWriteLock();
         try
         {
-            foreach (var pos in candidates)
+            var visited  = new HashSet<HexagonalPos>(candidates);
+            var frontier = new Queue<HexagonalPos>(candidates);
+
+            while (frontier.Count > 0)
             {
-                if (!Board.TryGetValue(pos, out var tile)) continue;
-                if (tile.Occupied) continue;
-                tile.Occupant = unit;
-                tile.Occupied = true;
-                unit.CurrentWorldPos = pos;
-                return pos;
+                var pos = frontier.Dequeue();
+
+                if (Board.TryGetValue(pos, out var tile) && !tile.Occupied)
+                {
+                    tile.Occupant = unit;
+                    tile.Occupied = true;
+                    unit.CurrentWorldPos = pos;
+                    return pos;
+                }
+
+                // tile is occupied or off-board — expand its neighbours
+                foreach (var neighbour in HexagonalPos.GetNeighbors(pos))
+                {
+                    if (visited.Contains(neighbour)) continue;
+                    if (!Board.ContainsKey(neighbour)) continue;
+                    visited.Add(neighbour);
+                    frontier.Enqueue(neighbour);
+                }
             }
-            return null;
+
+            return null; // entire reachable board is occupied
         }
         finally { _lock.ExitWriteLock(); }
     }
