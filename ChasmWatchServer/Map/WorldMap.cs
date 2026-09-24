@@ -1,4 +1,3 @@
-
 using System.Collections.Concurrent;
 
 public class WorldMap
@@ -8,10 +7,13 @@ public class WorldMap
     {
         return Map.GetOrAdd(pos, p =>
         {
-            var tile = new WorldTile(p);
+            var tile = new WorldTile(p.Copy());
             tile.Generate(0.5);
             tile.Active = true;
             return tile;
         });
     }
+
+    public bool TryGetTile(HexagonalPos pos, out WorldTile? tile) =>
+        Map.TryGetValue(pos, out tile);
 }

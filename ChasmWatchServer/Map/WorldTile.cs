@@ -5,27 +5,17 @@ public class WorldTile
     public Dictionary<HexagonalPos, BoardTile> Board = new();
     public bool Active = false;
 
-    private static readonly Dictionary<string, HexagonalPos> DirectionVectors = new()
+    private static readonly Dictionary<HexDirection, HexagonalPos> DirectionVectors = new()
     {
-        { "Up",        HexagonalPos.UP        },
-        { "Down",      HexagonalPos.DOWN      },
-        { "UpLeft",    HexagonalPos.LEFTUP    },
-        { "UpRight",   HexagonalPos.RIGHTUP   },
-        { "DownLeft",  HexagonalPos.LEFTDOWN  },
-        { "DownRight", HexagonalPos.RIGHTDOWN },
+        { HexDirection.UP,        HexagonalPos.UP        },
+        { HexDirection.DOWN,      HexagonalPos.DOWN      },
+        { HexDirection.LEFTUP,    HexagonalPos.LEFTUP    },
+        { HexDirection.RIGHTUP,   HexagonalPos.RIGHTUP   },
+        { HexDirection.LEFTDOWN,  HexagonalPos.LEFTDOWN  },
+        { HexDirection.RIGHTDOWN, HexagonalPos.RIGHTDOWN },
     };
 
-    public static readonly Dictionary<string, string> Opposites = new()
-    {
-        { "Up",        "Down"      },
-        { "Down",      "Up"        },
-        { "UpLeft",    "DownRight" },
-        { "UpRight",   "DownLeft"  },
-        { "DownLeft",  "UpRight"   },
-        { "DownRight", "UpLeft"    },
-    };
-
-    public Dictionary<string, List<HexagonalPos>> WorldExits = new();
+    public Dictionary<HexDirection, List<HexagonalPos>> WorldExits = new();
 
     public WorldTile(HexagonalPos position)
     {
@@ -39,7 +29,7 @@ public class WorldTile
         int targetSize = rand.Next(64, 512);
 
         HexagonalPos entrance = new HexagonalPos(0, 0, 0);
-        Queue<(HexagonalPos pos, string? requiredExit)> frontier = new();
+        Queue<(HexagonalPos pos, HexDirection? requiredExit)> frontier = new();
         frontier.Enqueue((entrance, null));
 
         while (Board.Count < targetSize && frontier.Count > 0)
@@ -49,16 +39,16 @@ public class WorldTile
             if (Board.ContainsKey(pos))
             {
                 if (requiredExit != null)
-                    Board[pos].exits[requiredExit] = true;
+                    Board[pos].exits[requiredExit.Value] = true;
                 continue;
             }
 
             BoardTile tile = new BoardTile(pos, pathable: true, occupied: false);
 
             if (requiredExit != null)
-                tile.exits[requiredExit] = true;
+                tile.exits[requiredExit.Value] = true;
 
-            foreach (string direction in DirectionVectors.Keys)
+            foreach (HexDirection direction in DirectionVectors.Keys)
             {
                 if (direction == requiredExit) continue;
                 tile.exits[direction] = rand.NextDouble() < openness;
@@ -70,7 +60,7 @@ public class WorldTile
             {
                 if (!isOpen) continue;
                 HexagonalPos neighbourPos = pos + DirectionVectors[direction];
-                string exitBackToUs = Opposites[direction];
+                HexDirection exitBackToUs = direction.Opposite();
 
                 if (Board.ContainsKey(neighbourPos))
                 {
@@ -82,7 +72,7 @@ public class WorldTile
         }
         foreach (var tile in Board.Values)
         {
-            foreach (string direction in DirectionVectors.Keys)
+            foreach (HexDirection direction in DirectionVectors.Keys)
             {
                 if (!tile.exits[direction]) continue;
                 HexagonalPos neighbourPos = tile.Position + DirectionVectors[direction];
@@ -128,26 +118,23 @@ public class WorldTile
             }
         }
     }
+
     public bool TryPlaceUnit(HexagonalPos boardPos, Unit unit)
     {
         _lock.EnterWriteLock();
         try
         {
             if (!Board.TryGetValue(boardPos, out var tile)) return false;
-            if (tile.Occupied) return false;
-            Board.TryGetValue(unit.CurrentWorldPos, out var currentTile);
-            if (currentTile != null)
-            {
-                currentTile.Occupant = null;
-                currentTile.Occupied = false;
-            }
+            if (!tile.Pathable || tile.Occupied) return false;
+            ClearUnitFromBoardNoLock(unit);
             tile.Occupant = unit;
             tile.Occupied = true;
-            unit.CurrentWorldPos = boardPos;
+            unit.CurrentBoardPos = tile.Position.Copy();
             return true;
         }
         finally { _lock.ExitWriteLock(); }
     }
+
     public HexagonalPos? TryPlaceUnitAtEntry(List<HexagonalPos> candidates, Unit unit)
     {
         _lock.EnterWriteLock();
@@ -160,15 +147,16 @@ public class WorldTile
             {
                 var pos = frontier.Dequeue();
 
-                if (Board.TryGetValue(pos, out var tile) && !tile.Occupied)
+                if (Board.TryGetValue(pos, out var tile) && tile.Pathable && !tile.Occupied)
                 {
+                    ClearUnitFromBoardNoLock(unit);
                     tile.Occupant = unit;
                     tile.Occupied = true;
-                    unit.CurrentWorldPos = pos;
-                    return pos;
+                    unit.CurrentBoardPos = tile.Position.Copy();
+                    return tile.Position.Copy();
                 }
 
-                // tile is occupied or off-board — expand its neighbours
+                // tile is occupied, impassable, or off-board — expand its neighbours
                 foreach (var neighbour in HexagonalPos.GetNeighbors(pos))
                 {
                     if (visited.Contains(neighbour)) continue;
@@ -181,5 +169,88 @@ public class WorldTile
             return null; // entire reachable board is occupied
         }
         finally { _lock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Validates ownership, destination walkability, and range (BFS up to
+    /// <paramref name="maxSteps"/>). Returns false for blocked/out-of-range
+    /// moves; callers treat that as "Move failed", not an error.
+    /// </summary>
+    public bool TryMoveUnit(Unit unit, HexagonalPos destination, int maxSteps)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            if (!Board.TryGetValue(unit.CurrentBoardPos, out var currentTile)
+                || !ReferenceEquals(currentTile.Occupant, unit))
+                return false;
+
+            if (!Board.TryGetValue(destination, out var destTile)) return false;
+            if (!destTile.Pathable || destTile.Occupied) return false;
+            if (destination.Equals(unit.CurrentBoardPos)) return false;
+
+            if (HexagonalPos.HexDistance(unit.CurrentBoardPos, destination) > maxSteps)
+                return false;
+
+            if (!IsReachableNoLock(unit.CurrentBoardPos, destination, maxSteps))
+                return false;
+
+            currentTile.Occupant = null;
+            currentTile.Occupied = false;
+            destTile.Occupant = unit;
+            destTile.Occupied = true;
+            unit.CurrentBoardPos = destTile.Position.Copy();
+            return true;
+        }
+        finally { _lock.ExitWriteLock(); }
+    }
+
+    public bool RemoveUnit(Unit unit)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            return ClearUnitFromBoardNoLock(unit);
+        }
+        finally { _lock.ExitWriteLock(); }
+    }
+
+    private bool ClearUnitFromBoardNoLock(Unit unit)
+    {
+        if (Board.TryGetValue(unit.CurrentBoardPos, out var currentTile)
+            && ReferenceEquals(currentTile.Occupant, unit))
+        {
+            currentTile.Occupant = null;
+            currentTile.Occupied = false;
+            return true;
+        }
+        return false;
+    }
+
+    private bool IsReachableNoLock(HexagonalPos start, HexagonalPos end, int maxSteps)
+    {
+        if (maxSteps <= 1)
+            return HexagonalPos.HexDistance(start, end) <= 1;
+
+        var visited = new HashSet<HexagonalPos> { start };
+        var queue = new Queue<(HexagonalPos pos, int steps)>();
+        queue.Enqueue((start, 0));
+
+        while (queue.Count > 0)
+        {
+            var (current, steps) = queue.Dequeue();
+            if (steps >= maxSteps) continue;
+            foreach (var next in HexagonalPos.GetNeighbors(current))
+            {
+                if (visited.Contains(next)) continue;
+                if (!Board.TryGetValue(next, out var tile)) continue;
+                if (!tile.Pathable) continue;
+                if (tile.Occupied && !next.Equals(end)) continue;
+                if (next.Equals(end)) return true;
+                visited.Add(next);
+                queue.Enqueue((next, steps + 1));
+            }
+        }
+        return false;
     }
 }

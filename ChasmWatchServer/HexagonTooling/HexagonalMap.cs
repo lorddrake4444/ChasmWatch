@@ -3,10 +3,10 @@ public class HexagonalMap<T> where T : HexNode
 {
     private readonly Dictionary<HexagonalPos, T> Grid = [];
 
-    public void SetTile(int Q , int R , int S, T tile)
+    public void SetTile(int q, int r, int s, T tile)
     {
-        Grid[new HexagonalPos(R, Q, S)] = tile;
-        tile.Position = new HexagonalPos(R, Q, S);
+        Grid[new HexagonalPos(r, q, s)] = tile;
+        tile.Position = new HexagonalPos(r, q, s);
     }
 
     public void SetTile(HexagonalPos pos, T tile)
@@ -15,9 +15,9 @@ public class HexagonalMap<T> where T : HexNode
         tile.Position = pos;
     }
 
-    public T? GetTile(int Q , int R , int S)
+    public T? GetTile(int q, int r, int s)
     {
-        if (Grid.ContainsKey(new HexagonalPos(R, Q, S))) return Grid[new HexagonalPos(R, Q, S)];
+        if (Grid.ContainsKey(new HexagonalPos(r, q, s))) return Grid[new HexagonalPos(r, q, s)];
         else 
         {
             throw new KeyNotFoundException();

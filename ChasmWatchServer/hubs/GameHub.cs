@@ -14,72 +14,96 @@ public class GameHub : Hub
     }
     private string Username() => Context.User?.Identity?.Name ?? "Unknown";
 
-    public async Task JoinTile(HexagonalPos pos , HexDirection? entryDirection)
+    private Player? CurrentPlayer()
+    {
+        var playerIdClaim = Context.User?.FindFirst("PlayerId")?.Value;
+        if (playerIdClaim == null || !Guid.TryParse(playerIdClaim, out var playerId))
+            return null;
+        return _playerService.GetPlayerById(playerId);
+    }
+
+    public async Task JoinTile(HexagonalPos pos, HexDirection? entryDirection)
     {
         string roomName = pos.ToString();
         string username = Username();
-        var playerIdClaim = Context.User?.FindFirst("PlayerId")?.Value;
-        if (playerIdClaim == null || !Guid.TryParse(playerIdClaim, out var playerId))
+        var player = CurrentPlayer();
+        if (player == null)
         {
             await Clients.Caller.SendAsync("SystemMessage", "Invalid session.");
             return;
         }
-        var player = _playerService.GetPlayerById(playerId);
-/*         if (player?.ActiveChar == null)
+        if (player.ActiveChar == null)
         {
             await Clients.Caller.SendAsync("SystemMessage", "No active character.");
             return;
         }
-        Unit playerUnit = player.ActiveChar; */
-        Unit playerUnit = new Unit(100, 1); // Temporary unit creation for testing
-        await Groups.AddToGroupAsync(Context.ConnectionId, roomName);
-        await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username} joined tile {roomName}");
+        Unit playerUnit = player.ActiveChar;
+
         if (entryDirection == null)
             entryDirection = HexDirection.DOWN;
-        WorldTile Tile = _state.AddUnitToTile(pos, entryDirection, playerUnit);
-        var boardDto = Tile.Board.Values.Select(b => new
+
+        try
         {
-            b.Position,
-            b.Pathable,
-            b.Occupied,
-            b.IsWorldExit,
-            b.WorldExitDirection,
-            b.exits
-        });
-        await Clients.Group(roomName).SendAsync("ReceiveTileInfo", boardDto);
+            WorldTile tile = _state.AddUnitToTile(pos, entryDirection, playerUnit);
+            await Groups.AddToGroupAsync(Context.ConnectionId, roomName);
+            await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username} joined tile {roomName}");
+            await Clients.Group(roomName).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", $"Join failed: {ex.Message}");
+        }
     }
 
-    public async Task MoveUnit(HexagonalPos WorldTilePos , HexagonalPos destination)
+    public async Task MoveUnit(HexagonalPos worldTilePos, HexagonalPos destination)
     {
-        var username = Username();
-        var playerIdClaim = Context.User?.FindFirst("PlayerId")?.Value;
-        if (playerIdClaim == null || !Guid.TryParse(playerIdClaim, out var playerId))
+        var player = CurrentPlayer();
+        if (player == null)
         {
             await Clients.Caller.SendAsync("SystemMessage", "Invalid session.");
             return;
         }
-        var player = _playerService.GetPlayerById(playerId);
-/*         if (player?.ActiveChar == null)
+        if (player.ActiveChar == null)
         {
             await Clients.Caller.SendAsync("SystemMessage", "No active character.");
             return;
-        } */
-        Unit playerUnit = new Unit(100, 1); // Temporary unit creation for testing
-        WorldTile? tile = _state.MoveUnit(WorldTilePos, destination, playerUnit);
-        if (tile == null)
-        {
-            await Clients.Caller.SendAsync("SystemMessage", "Move failed.");
-            return;
         }
-        var boardDto = tile.Board.Values.Select(b => new
+        Unit playerUnit = player.ActiveChar;
+
+        try
+        {
+            WorldTile? tile = _state.MoveUnit(worldTilePos, destination, playerUnit);
+            if (tile == null)
+            {
+                await Clients.Caller.SendAsync("SystemMessage", "Move failed.");
+                return;
+            }
+            await Clients.Group(tile.Position.ToString()).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", $"Move failed: {ex.Message}");
+        }
+    }
+
+    private static object BuildBoardDto(WorldTile tile) =>
+        tile.Board.Values.Select(b => new
         {
             b.Position,
             b.Pathable,
             b.Occupied,
             b.IsWorldExit,
-            b.WorldExitDirection,
-            b.exits
+            WorldExitDirection = b.WorldExitDirection?.ToString(),
+            Exits = b.exits.ToDictionary(e => e.Key.ToString(), e => e.Value),
         });
-        await Clients.Group(tile.Position.ToString()).SendAsync("ReceiveTileInfo", boardDto);
-    }
+
+    private static object BuildUnitDto(Unit unit) => new
+    {
+        unit.ID,
+        unit.Name,
+        unit.Health,
+        unit.Speed,
+        BoardPos = unit.CurrentBoardPos,
+        TilePos = unit.CurrentTile,
+    };
 }

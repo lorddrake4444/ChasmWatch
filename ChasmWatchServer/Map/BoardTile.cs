@@ -2,16 +2,16 @@ public class BoardTile : HexNode
 {
     public Entity? Occupant { get; set; }
     public bool IsWorldExit { get; set; } = false;
-    public string? WorldExitDirection { get; set; } = null;
+    public HexDirection? WorldExitDirection { get; set; } = null;
 
-    public Dictionary<string, bool> exits = new()
+    public Dictionary<HexDirection, bool> exits = new()
     {
-        { "Up",        false },
-        { "Down",      false },
-        { "UpLeft",    false },
-        { "UpRight",   false },
-        { "DownLeft",  false },
-        { "DownRight", false },
+        { HexDirection.UP,        false },
+        { HexDirection.DOWN,      false },
+        { HexDirection.LEFTUP,    false },
+        { HexDirection.RIGHTUP,   false },
+        { HexDirection.LEFTDOWN,  false },
+        { HexDirection.RIGHTDOWN, false },
     };
 
     public BoardTile(HexagonalPos position, bool pathable, bool occupied)
