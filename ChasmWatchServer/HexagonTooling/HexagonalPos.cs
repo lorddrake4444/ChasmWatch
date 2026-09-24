@@ -38,11 +38,11 @@ public record class HexagonalPos
 
     static public readonly HexagonalPos DOWN = new HexagonalPos(+1, 0, -1);
 
-    static public readonly HexagonalPos LEFTUP = new HexagonalPos(-1, +1, 0);
+    static public readonly HexagonalPos LEFTUP = new HexagonalPos(0, -1, +1);
 
     static public readonly HexagonalPos LEFTDOWN = new HexagonalPos(+1, -1, 0);
 
-    static public readonly HexagonalPos RIGHTUP = new HexagonalPos(0, -1, +1);
+    static public readonly HexagonalPos RIGHTUP = new HexagonalPos(-1, +1, 0);
 
     static public readonly HexagonalPos RIGHTDOWN = new HexagonalPos(0, +1, -1);
 

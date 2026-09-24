@@ -12,3 +12,6 @@
 
 # Mac system files (if you are on macOS)
 .DS_Store
+
+# Python compiled files
+__pycache__/

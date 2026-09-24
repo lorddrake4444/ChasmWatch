@@ -81,6 +81,21 @@ public class WorldTile
             }
         }
 
+        // Enforce bidirectional doors. Generation stops early once the target
+        // size is reached, which can orphan a carved door whose back-link was
+        // still queued in the frontier. Heal those so every exit maps to its
+        // exact opposite on the neighboring tile.
+        foreach (var tile in Board.Values)
+        {
+            foreach (var (direction, isOpen) in tile.exits)
+            {
+                if (!isOpen) continue;
+                HexagonalPos neighbourPos = tile.Position + DirectionVectors[direction];
+                if (Board.TryGetValue(neighbourPos, out var neighbour))
+                    neighbour.exits[direction.Opposite()] = true;
+            }
+        }
+
         PlaceWorldExits(rand);
     }
 
@@ -215,6 +230,62 @@ public class WorldTile
         finally { _lock.ExitWriteLock(); }
     }
 
+    public bool ContainsUnit(Unit unit)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            if (Board.TryGetValue(unit.CurrentBoardPos, out var tile)
+                && ReferenceEquals(tile.Occupant, unit))
+                return true;
+            foreach (var boardTile in Board.Values)
+            {
+                if (ReferenceEquals(boardTile.Occupant, unit))
+                    return true;
+            }
+            return false;
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Returns the world-exit direction of the board tile <paramref name="unit"/>
+    /// currently occupies, or false when it is not standing on an exit.
+    /// </summary>
+    public bool TryGetExitDirection(Unit unit, out HexDirection exitDirection)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            BoardTile? occupied = null;
+            if (Board.TryGetValue(unit.CurrentBoardPos, out var fast)
+                && ReferenceEquals(fast.Occupant, unit))
+            {
+                occupied = fast;
+            }
+            else
+            {
+                foreach (var boardTile in Board.Values)
+                {
+                    if (ReferenceEquals(boardTile.Occupant, unit))
+                    {
+                        occupied = boardTile;
+                        break;
+                    }
+                }
+            }
+
+            if (occupied != null && occupied.IsWorldExit && occupied.WorldExitDirection != null)
+            {
+                exitDirection = occupied.WorldExitDirection.Value;
+                return true;
+            }
+            exitDirection = default;
+            return false;
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
     private bool ClearUnitFromBoardNoLock(Unit unit)
     {
         if (Board.TryGetValue(unit.CurrentBoardPos, out var currentTile)
@@ -223,6 +294,17 @@ public class WorldTile
             currentTile.Occupant = null;
             currentTile.Occupied = false;
             return true;
+        }
+        // Fallback scan: CurrentBoardPos may already point at another tile
+        // after a cross-tile placement, or the key instance may differ.
+        foreach (var boardTile in Board.Values)
+        {
+            if (ReferenceEquals(boardTile.Occupant, unit))
+            {
+                boardTile.Occupant = null;
+                boardTile.Occupied = false;
+                return true;
+            }
         }
         return false;
     }

@@ -79,11 +79,69 @@ public class GameHub : Hub
                 return;
             }
             await Clients.Group(tile.Position.ToString()).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
+            await SendExitPromptIfOnExit(worldTilePos, tile, playerUnit);
         }
         catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
         {
             await Clients.Caller.SendAsync("SystemMessage", $"Move failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Called by the client after the player accepts the exit prompt.
+    /// Removes the unit from its current world tile and places it on the
+    /// neighboring tile attached to the exit, then moves the connection
+    /// to the new tile's group.
+    /// </summary>
+    public async Task TraverseWorldExit(HexagonalPos currentWorldTilePos)
+    {
+        string username = Username();
+        var player = CurrentPlayer();
+        if (player == null)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", "Invalid session.");
+            return;
+        }
+        if (player.ActiveChar == null)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", "No active character.");
+            return;
+        }
+        Unit playerUnit = player.ActiveChar;
+
+        try
+        {
+            TraverseResult result = _state.TraverseWorldExit(currentWorldTilePos, playerUnit);
+            string oldRoom = currentWorldTilePos.ToString();
+            string newRoom = result.NeighborPos.ToString();
+
+            await Groups.RemoveFromGroupAsync(Context.ConnectionId, oldRoom);
+            await Groups.AddToGroupAsync(Context.ConnectionId, newRoom);
+
+            await Clients.Group(oldRoom).SendAsync("ReceiveMessage", "System", $"{username} left tile {oldRoom} through the {result.ExitDirection} exit.");
+            await Clients.Group(oldRoom).SendAsync("ReceiveTileInfo", BuildBoardDto(result.OldTile), BuildUnitDto(playerUnit));
+            await Clients.Group(newRoom).SendAsync("ReceiveMessage", "System", $"{username} entered tile {newRoom} from {oldRoom}.");
+            await Clients.Group(newRoom).SendAsync("ReceiveTileInfo", BuildBoardDto(result.NewTile), BuildUnitDto(playerUnit));
+        }
+        catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", $"Traverse failed: {ex.Message}");
+        }
+    }
+
+    private async Task SendExitPromptIfOnExit(HexagonalPos worldTilePos, WorldTile tile, Unit unit)
+    {
+        if (!tile.TryGetExitDirection(unit, out HexDirection exitDirection))
+            return;
+
+        HexagonalPos neighborPos = worldTilePos + exitDirection.ToOffset();
+        await Clients.Caller.SendAsync("ExitPrompt", new
+        {
+            WorldTilePos = worldTilePos,
+            BoardPos = unit.CurrentBoardPos,
+            ExitDirection = exitDirection.ToString(),
+            NeighborTilePos = neighborPos,
+        });
     }
 
     private static object BuildBoardDto(WorldTile tile) =>

@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, messagebox
 import websocket, requests, json, threading, time, math
 
 # ── Config ─────────────────────────────────────────────────────────────────
@@ -305,6 +305,7 @@ class App(tk.Tk):
         self.username         = ""
         self.current_tile_pos = None
         self.chat_tabs        = {}
+        self._exit_prompt_open = False
 
         self._build_login()
 
@@ -593,14 +594,105 @@ class App(tk.Tk):
         target = data.get("target")
         args   = data.get("arguments", [])
         if target == "ReceiveTileInfo":
-            self.board.load_board(args[0])
-            self.status_lbl.config(text=f"+ {len(args[0])} tiles", fg=ACCENT2)
+            board = args[0] if args else []
+            unit  = args[1] if len(args) > 1 else None
+            self._on_tile_info(board, unit)
+        elif target == "ExitPrompt":
+            if args:
+                self._on_exit_prompt(args[0])
         elif target == "ReceiveMessage":
             s, m = args[0], args[1]
             tab = self._tile_key(self.current_tile_pos)
             self._get_tab(tab).append(s, m, "sys" if s=="System" else "normal")
         elif target == "SystemMessage":
             self._sys_log(args[0])
+
+    # ── Board / unit state ────────────────────────────────────────────────
+
+    @staticmethod
+    def _pos_tuple(d):
+        if not isinstance(d, dict):
+            return None
+        q = d.get("q", d.get("Q"))
+        r = d.get("r", d.get("R"))
+        s = d.get("s", d.get("S"))
+        if q is None or r is None or s is None:
+            return None
+        return (int(q), int(r), int(s))
+
+    def _unit_is_mine(self, unit):
+        if not unit or not isinstance(unit, dict):
+            return False
+        name = unit.get("name", unit.get("Name"))
+        return bool(name) and name == self.username
+
+    def _on_tile_info(self, board, unit):
+        if not hasattr(self, "board"):
+            return
+        mine = self._unit_is_mine(unit)
+        if mine and isinstance(unit, dict):
+            tile_pos = self._pos_tuple(unit.get("tilePos", unit.get("TilePos")))
+            board_pos = self._pos_tuple(unit.get("boardPos", unit.get("BoardPos")))
+            if tile_pos is not None and tile_pos != self.current_tile_pos:
+                self._enter_tile_context(*tile_pos, status="traveling...")
+            self.board.load_board(board, player_pos=board_pos)
+            n = len(board) if isinstance(board, list) else 0
+            self.status_lbl.config(text=f"+ {n} tiles", fg=ACCENT2)
+        else:
+            # Another player's update (or legacy payload): keep our own marker.
+            keep = getattr(getattr(self, "board", None), "player_pos", None)
+            self.board.load_board(board, player_pos=keep)
+            n = len(board) if isinstance(board, list) else 0
+            self.status_lbl.config(text=f"+ {n} tiles", fg=ACCENT2)
+
+    def _enter_tile_context(self, q, r, s, status="joining..."):
+        self.current_tile_pos = (q, r, s)
+        group = self._tile_key((q, r, s))
+        if self.chat_ws:
+            self.chat_ws.send(json.dumps({
+                "type": 1, "target": "JoinRoom", "arguments": [group]
+            }) + RECORD_SEPARATOR)
+        self._add_tab(group)
+        self._switch_tab(group)
+        self.pos_label.config(text=f"tile {q},{r},{s}", fg=TEXT)
+        self.status_lbl.config(text=status, fg=TEXT_DIM)
+
+    # ── World-exit prompt ─────────────────────────────────────────────────
+
+    def _on_exit_prompt(self, prompt):
+        if getattr(self, "_exit_prompt_open", False):
+            return
+        world = self._pos_tuple(prompt.get("worldTilePos", prompt.get("WorldTilePos")))
+        neighbor = self._pos_tuple(prompt.get("neighborTilePos", prompt.get("NeighborTilePos")))
+        exit_dir = prompt.get("exitDirection", prompt.get("ExitDirection", "?"))
+        if world is None or neighbor is None:
+            return
+        if world != self.current_tile_pos:
+            return  # stale prompt for a tile we already left
+        nq, nr, ns = neighbor
+        self._exit_prompt_open = True
+        try:
+            go = messagebox.askyesno(
+                "World exit",
+                f"You stand on the {exit_dir} exit.\n"
+                f"Travel to tile {nq},{nr},{ns}?",
+            )
+        finally:
+            self._exit_prompt_open = False
+        if go:
+            self._confirm_traverse(world)
+        else:
+            self.status_lbl.config(text="stayed on this tile", fg=TEXT_DIM)
+
+    def _confirm_traverse(self, world_pos):
+        if not self.game_ws:
+            return
+        wq, wr, ws = world_pos
+        self.game_ws.send(json.dumps({
+            "type": 1, "target": "TraverseWorldExit",
+            "arguments": [{"q": wq, "r": wr, "s": ws}]
+        }) + RECORD_SEPARATOR)
+        self.status_lbl.config(text="traveling...", fg=TEXT_DIM)
 
     # ── Actions ───────────────────────────────────────────────────────────
 
@@ -617,23 +709,12 @@ class App(tk.Tk):
             self.status_lbl.config(text="x q+r+s must equal 0", fg=DANGER2)
             return
 
-        self.current_tile_pos = (q, r, s)
-        group = self._tile_key((q, r, s))
+        self._enter_tile_context(q, r, s, status="joining...")
 
         self.game_ws.send(json.dumps({
             "type":1, "target":"JoinTile",
             "arguments":[{"q":q,"r":r,"s":s}, None]
         }) + RECORD_SEPARATOR)
-
-        if self.chat_ws:
-            self.chat_ws.send(json.dumps({
-                "type":1, "target":"JoinRoom", "arguments":[group]
-            }) + RECORD_SEPARATOR)
-
-        self._add_tab(group)
-        self._switch_tab(group)
-        self.pos_label.config(text=f"tile {q},{r},{s}", fg=TEXT)
-        self.status_lbl.config(text="joining...", fg=TEXT_DIM)
 
     def _on_hex_click(self, q, r, s):
         if not self.game_ws or not self.current_tile_pos:
@@ -650,7 +731,7 @@ class App(tk.Tk):
             return
         q, r, s = key
         flags = []
-        if tile.get("isWorldExit"):   flags.append(f"exit>{tile.get('worldExitDirection','?')}")
+        if tile.get("isWorldExit"):   flags.append(f"exit>{tile.get('worldExitDirection','?')} (click to travel)")
         if tile.get("occupied"):      flags.append("occupied")
         if not tile.get("pathable", True): flags.append("impassable")
         flag_str = "  " + "  ".join(f"[{f}]" for f in flags) if flags else ""
