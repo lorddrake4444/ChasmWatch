@@ -3,6 +3,7 @@ public class BoardTile : HexNode
     public Entity? Occupant { get; set; }
     public bool IsWorldExit { get; set; } = false;
     public HexDirection? WorldExitDirection { get; set; } = null;
+    public bool Interactable { get; set; } = false;
 
     public Dictionary<HexDirection, bool> exits = new()
     {

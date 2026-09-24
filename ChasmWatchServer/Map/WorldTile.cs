@@ -286,6 +286,74 @@ public class WorldTile
         finally { _lock.ExitReadLock(); }
     }
 
+    /// <summary>
+    /// Marks a random non-exit, pathable board hex as interactable, preferring
+    /// unoccupied tiles. Returns the chosen position, or null when none exists.
+    /// </summary>
+    public HexagonalPos? RevealInteractable(Random? rand = null)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            rand ??= new Random();
+            var candidates = Board.Values
+                .Where(t => t.Pathable && !t.IsWorldExit && !t.Interactable)
+                .ToList();
+            if (candidates.Count == 0)
+                return null;
+            var free = candidates.Where(t => !t.Occupied).ToList();
+            var pool = free.Count > 0 ? free : candidates;
+            var chosen = pool[rand.Next(pool.Count)];
+            chosen.Interactable = true;
+            return chosen.Position.Copy();
+        }
+        finally { _lock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Returns true when <paramref name="unit"/> stands on an interactable hex.
+    /// </summary>
+    public bool IsOnInteractable(Unit unit)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            return FindOccupiedTileNoLock(unit)?.Interactable == true;
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Clears the interactable flag on <paramref name="unit"/>'s hex.
+    /// Returns false when the unit is not standing on an interactable hex.
+    /// </summary>
+    public bool TryConsumeInteractable(Unit unit)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            var tile = FindOccupiedTileNoLock(unit);
+            if (tile == null || !tile.Interactable)
+                return false;
+            tile.Interactable = false;
+            return true;
+        }
+        finally { _lock.ExitWriteLock(); }
+    }
+
+    private BoardTile? FindOccupiedTileNoLock(Unit unit)
+    {
+        if (Board.TryGetValue(unit.CurrentBoardPos, out var fast)
+            && ReferenceEquals(fast.Occupant, unit))
+            return fast;
+        foreach (var boardTile in Board.Values)
+        {
+            if (ReferenceEquals(boardTile.Occupant, unit))
+                return boardTile;
+        }
+        return null;
+    }
+
     private bool ClearUnitFromBoardNoLock(Unit unit)
     {
         if (Board.TryGetValue(unit.CurrentBoardPos, out var currentTile)

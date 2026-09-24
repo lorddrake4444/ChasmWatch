@@ -33,6 +33,7 @@ HEX_EXIT  = "#0e1a26"
 HEX_OCC   = "#200e0e"
 HEX_HOVER = "#1a2e1a"
 HEX_PLAYER= "#2a5c3a"
+HEX_INTERACT = "#5a4517"
 FONT_MONO = ("Courier New", 10)
 FONT_SM   = ("Courier New", 9)
 FONT_LG   = ("Courier New", 11, "bold")
@@ -182,6 +183,7 @@ class HexBoard(tk.Canvas):
 
     def _base_color(self, tile):
         if not tile.get("pathable", True):  return HEX_WALL
+        if tile.get("interactable"):        return HEX_INTERACT
         if tile.get("isWorldExit"):         return HEX_EXIT
         if tile.get("occupied"):            return HEX_OCC
         return HEX_EMPTY
@@ -202,15 +204,24 @@ class HexBoard(tk.Canvas):
             pts  = self._corners(cx, cy)
             flat = [c for pt in pts for c in pt]
             is_player = self.player_pos == key
+            is_inter  = bool(tile.get("interactable"))
             color   = HEX_PLAYER if is_player else self._base_color(tile)
-            outline = ACCENT2    if is_player else BORDER
-            ow      = 1.5        if is_player else 0.5
+            outline = GOLD2      if is_inter and not is_player else (ACCENT2 if is_player else BORDER)
+            ow      = 1.5        if (is_player or is_inter) else 0.5
             self.hex_items[key] = self.create_polygon(
                 flat, fill=color, outline=outline, width=ow)
             fsz = max(6, int(self._size() * 0.5))
-            if tile.get("isWorldExit"):
+            if is_player and is_inter:
+                self.text_items[key] = self.create_text(
+                    cx, cy, text="!", fill=GOLD2,
+                    font=("Courier New", fsz, "bold"))
+            elif tile.get("isWorldExit"):
                 self.text_items[key] = self.create_text(
                     cx, cy, text="*", fill=ACCENT2,
+                    font=("Courier New", fsz, "bold"))
+            elif is_inter:
+                self.text_items[key] = self.create_text(
+                    cx, cy, text="!", fill=GOLD2,
                     font=("Courier New", fsz, "bold"))
             elif is_player:
                 self.text_items[key] = self.create_text(
@@ -306,6 +317,7 @@ class App(tk.Tk):
         self.current_tile_pos = None
         self.chat_tabs        = {}
         self._exit_prompt_open = False
+        self.objective_tile   = None
 
         self._build_login()
 
@@ -468,7 +480,11 @@ class App(tk.Tk):
         self.hover_lbl = tk.Label(foot, text="hover a tile",
                                   font=("Courier New",8), fg=TEXT_DIM, bg=BG2)
         self.hover_lbl.pack(side=tk.LEFT, padx=8)
-        for col, lbl in [(HEX_PLAYER,"you"),(HEX_EXIT,"exit"),
+        tk.Button(foot, text="INTERACT [E]", font=("Courier New",8,"bold"),
+                  bg=BG4, fg=GOLD2, relief=tk.FLAT, bd=0,
+                  activebackground=GOLD, activeforeground=TEXT_BRT,
+                  cursor="hand2", command=self._interact).pack(side=tk.LEFT, padx=8)
+        for col, lbl in [(HEX_PLAYER,"you"),(HEX_EXIT,"exit"),(HEX_INTERACT,"[!]"),
                          (HEX_OCC,"occupied"),(HEX_EMPTY,"open"),(HEX_HOVER,"hover")]:
             tk.Label(foot, text="##", fg=col, bg=BG2,
                      font=("Courier New",9)).pack(side=tk.RIGHT, padx=(0,1))
@@ -481,6 +497,16 @@ class App(tk.Tk):
         side = tk.Frame(body, bg=BG2, width=308)
         side.pack(side=tk.RIGHT, fill=tk.Y)
         side.pack_propagate(False)
+        tk.Label(side, text="OBJECTIVE", font=("Courier New",8,"bold"),
+                 fg=TEXT_DIM, bg=BG2).pack(anchor="w", padx=10, pady=(8,2))
+        self.quest_lbl = tk.Label(side, text="no objective yet",
+                                  font=("Courier New",8), fg=GOLD2, bg=BG2,
+                                  wraplength=280, justify="left")
+        self.quest_lbl.pack(anchor="w", padx=10)
+        self.completed_lbl = tk.Label(side, text="completed: 0",
+                                      font=("Courier New",8), fg=TEXT_DIM, bg=BG2)
+        self.completed_lbl.pack(anchor="w", padx=10, pady=(0,4))
+        tk.Frame(side, bg=BORDER, height=1).pack(fill=tk.X, padx=4)
         tk.Label(side, text="COMMS", font=("Courier New",8,"bold"),
                  fg=TEXT_DIM, bg=BG2).pack(anchor="w", padx=10, pady=(8,2))
         tk.Frame(side, bg=BORDER, height=1).pack(fill=tk.X, padx=4)
@@ -496,6 +522,9 @@ class App(tk.Tk):
                foreground=[("selected", TEXT_BRT)])
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=2, pady=(2,4))
         self._add_tab("global")
+
+        self.bind("<KeyPress-e>", self._on_key_interact)
+        self.bind("<KeyPress-E>", self._on_key_interact)
 
     def _coord_entry(self, parent, label, default):
         tk.Label(parent, text=label, font=("Courier New",8),
@@ -600,6 +629,9 @@ class App(tk.Tk):
         elif target == "ExitPrompt":
             if args:
                 self._on_exit_prompt(args[0])
+        elif target == "QuestState":
+            if args:
+                self._on_quest_state(args[0])
         elif target == "ReceiveMessage":
             s, m = args[0], args[1]
             tab = self._tile_key(self.current_tile_pos)
@@ -637,7 +669,11 @@ class App(tk.Tk):
                 self._enter_tile_context(*tile_pos, status="traveling...")
             self.board.load_board(board, player_pos=board_pos)
             n = len(board) if isinstance(board, list) else 0
-            self.status_lbl.config(text=f"+ {n} tiles", fg=ACCENT2)
+            standing_on = self.board.tiles.get(board_pos, {}) if board_pos else {}
+            if standing_on.get("interactable"):
+                self.status_lbl.config(text=f"+ {n} tiles  [E] interact!", fg=GOLD2)
+            else:
+                self.status_lbl.config(text=f"+ {n} tiles", fg=ACCENT2)
         else:
             # Another player's update (or legacy payload): keep our own marker.
             keep = getattr(getattr(self, "board", None), "player_pos", None)
@@ -694,6 +730,35 @@ class App(tk.Tk):
         }) + RECORD_SEPARATOR)
         self.status_lbl.config(text="traveling...", fg=TEXT_DIM)
 
+    # ── Quests ────────────────────────────────────────────────────────────
+
+    def _on_quest_state(self, state):
+        target = self._pos_tuple(state.get("targetTile", state.get("TargetTile")))
+        done = state.get("questsFinished", state.get("QuestsFinished", 0))
+        self.objective_tile = target
+        if hasattr(self, "quest_lbl"):
+            if target is None:
+                self.quest_lbl.config(text="no objective")
+            else:
+                self.quest_lbl.config(text=f"seek tile {target[0]},{target[1]},{target[2]}")
+        if hasattr(self, "completed_lbl"):
+            self.completed_lbl.config(text=f"completed: {done}")
+
+    def _on_key_interact(self, event=None):
+        focused = self.focus_get()
+        if isinstance(focused, (tk.Entry, tk.Text)):
+            return  # typing in chat/login — don't steal "e"
+        self._interact()
+
+    def _interact(self):
+        if not self.game_ws or not self.current_tile_pos:
+            return
+        wq, wr, ws = self.current_tile_pos
+        self.game_ws.send(json.dumps({
+            "type": 1, "target": "Interact",
+            "arguments": [{"q": wq, "r": wr, "s": ws}, None]
+        }) + RECORD_SEPARATOR)
+
     # ── Actions ───────────────────────────────────────────────────────────
 
     def _join_tile(self):
@@ -731,6 +796,7 @@ class App(tk.Tk):
             return
         q, r, s = key
         flags = []
+        if tile.get("interactable"): flags.append("[!] interactable — press E")
         if tile.get("isWorldExit"):   flags.append(f"exit>{tile.get('worldExitDirection','?')} (click to travel)")
         if tile.get("occupied"):      flags.append("occupied")
         if not tile.get("pathable", True): flags.append("impassable")

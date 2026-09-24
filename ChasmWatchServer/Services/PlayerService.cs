@@ -4,6 +4,7 @@ public interface IPlayerService
     Player CreatePlayer(string username);
     Player? GetPlayerById(Guid id);
     void DeletePlayer(Guid id);
+    void UpdatePlayer(Guid id, Action<Player> update);
 }
 
 public class PlayerService : IPlayerService
@@ -55,6 +56,16 @@ public class PlayerService : IPlayerService
             {
                 _players.Remove(p);
             }
+        }
+    }
+
+    public void UpdatePlayer(Guid id, Action<Player> update)
+    {
+        lock (_lock)
+        {
+            Player? p = _players.FirstOrDefault(x => x.ID == id);
+            if (p != null)
+                update(p);
         }
     }
 

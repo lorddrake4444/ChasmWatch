@@ -1,4 +1,4 @@
-﻿﻿using Microsoft.AspNetCore.Authentication.Cookies;
+﻿using Microsoft.AspNetCore.Authentication.Cookies;
 
 public class Startup
 {
@@ -30,6 +30,7 @@ public class Startup
         services.AddSingleton<IPlayerService, PlayerService>();
         services.AddSingleton<GameState>();
         services.AddSingleton<WorldMap>();
+        services.AddSingleton<ObjectiveService>();
     }
 
     // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
