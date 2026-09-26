@@ -90,15 +90,16 @@ public class ObjectiveService
         NothingHere,
         NotYours,
         Completed,
+        EnemyKilled,
     }
 
     public sealed record InteractResult(InteractOutcome Outcome, string Message, Objective? NextObjective = null);
 
     /// <summary>
-    /// Generic positional interaction: triggers when the unit stands on an
-    /// interactable hex. Only the objective owner can complete their objective;
-    /// completion clears the flag, increments the counter, and starts the next
-    /// quest from the player's current position.
+    /// Generic positional interaction. Quest hexes take priority; otherwise an
+    /// adjacent enemy is killed (deleted). Only the objective owner can complete
+    /// their objective; completion clears the flag, increments the counter, and
+    /// starts the next quest from the player's current position.
     /// </summary>
     public InteractResult Interact(Player player, Unit unit, HexagonalPos claimedWorldPos)
     {
@@ -109,7 +110,12 @@ public class ObjectiveService
             return new InteractResult(InteractOutcome.NotOnTile, "You are not on that tile.");
 
         if (!tile.IsOnInteractable(unit))
+        {
+            Enemy? slain = tile.TryKillAdjacentEnemy(unit);
+            if (slain != null)
+                return new InteractResult(InteractOutcome.EnemyKilled, $"{slain.Name} destroyed. ({tile.CountEnemies()} remain on this tile.)");
             return new InteractResult(InteractOutcome.NothingHere, "Nothing to interact with here.");
+        }
 
         Objective? objective = player.ActiveObjective;
         if (objective == null || !claimedWorldPos.Equals(objective.TargetTile))

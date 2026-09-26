@@ -34,6 +34,9 @@ HEX_OCC   = "#200e0e"
 HEX_HOVER = "#1a2e1a"
 HEX_PLAYER= "#2a5c3a"
 HEX_INTERACT = "#5a4517"
+HEX_ENEMY = "#4a1a3a"
+# Cube-neighbor offsets in (q, r, s) order, mirroring the server's hex vectors.
+CUBE_OFFSETS = [(0,-1,1),(0,1,-1),(-1,0,1),(-1,1,0),(1,-1,0),(1,0,-1)]
 FONT_MONO = ("Courier New", 10)
 FONT_SM   = ("Courier New", 9)
 FONT_LG   = ("Courier New", 11, "bold")
@@ -185,6 +188,7 @@ class HexBoard(tk.Canvas):
         if not tile.get("pathable", True):  return HEX_WALL
         if tile.get("interactable"):        return HEX_INTERACT
         if tile.get("isWorldExit"):         return HEX_EXIT
+        if tile.get("occupantKind") == "enemy": return HEX_ENEMY
         if tile.get("occupied"):            return HEX_OCC
         return HEX_EMPTY
 
@@ -222,6 +226,10 @@ class HexBoard(tk.Canvas):
             elif is_inter:
                 self.text_items[key] = self.create_text(
                     cx, cy, text="!", fill=GOLD2,
+                    font=("Courier New", fsz, "bold"))
+            elif tile.get("occupantKind") == "enemy":
+                self.text_items[key] = self.create_text(
+                    cx, cy, text="x", fill=DANGER2,
                     font=("Courier New", fsz, "bold"))
             elif is_player:
                 self.text_items[key] = self.create_text(
@@ -485,6 +493,7 @@ class App(tk.Tk):
                   activebackground=GOLD, activeforeground=TEXT_BRT,
                   cursor="hand2", command=self._interact).pack(side=tk.LEFT, padx=8)
         for col, lbl in [(HEX_PLAYER,"you"),(HEX_EXIT,"exit"),(HEX_INTERACT,"[!]"),
+                         (HEX_ENEMY,"enemy"),
                          (HEX_OCC,"occupied"),(HEX_EMPTY,"open"),(HEX_HOVER,"hover")]:
             tk.Label(foot, text="##", fg=col, bg=BG2,
                      font=("Courier New",9)).pack(side=tk.RIGHT, padx=(0,1))
@@ -670,8 +679,13 @@ class App(tk.Tk):
             self.board.load_board(board, player_pos=board_pos)
             n = len(board) if isinstance(board, list) else 0
             standing_on = self.board.tiles.get(board_pos, {}) if board_pos else {}
+            hints = []
             if standing_on.get("interactable"):
-                self.status_lbl.config(text=f"+ {n} tiles  [E] interact!", fg=GOLD2)
+                hints.append("[E] interact!")
+            if board_pos and self._enemy_adjacent(board_pos):
+                hints.append("[E] attack!")
+            if hints:
+                self.status_lbl.config(text=f"+ {n} tiles  {' '.join(hints)}", fg=GOLD2)
             else:
                 self.status_lbl.config(text=f"+ {n} tiles", fg=ACCENT2)
         else:
@@ -680,6 +694,16 @@ class App(tk.Tk):
             self.board.load_board(board, player_pos=keep)
             n = len(board) if isinstance(board, list) else 0
             self.status_lbl.config(text=f"+ {n} tiles", fg=ACCENT2)
+
+    def _enemy_adjacent(self, board_pos):
+        if not board_pos or not hasattr(self, "board"):
+            return False
+        q, r, s = board_pos
+        for dq, dr, ds in CUBE_OFFSETS:
+            t = self.board.tiles.get((q + dq, r + dr, s + ds))
+            if t and t.get("occupantKind") == "enemy":
+                return True
+        return False
 
     def _enter_tile_context(self, q, r, s, status="joining..."):
         self.current_tile_pos = (q, r, s)
@@ -797,6 +821,8 @@ class App(tk.Tk):
         q, r, s = key
         flags = []
         if tile.get("interactable"): flags.append("[!] interactable — press E")
+        if tile.get("occupantKind") == "enemy":
+            flags.append(f"enemy: {tile.get('occupantName','?')} — press E to attack")
         if tile.get("isWorldExit"):   flags.append(f"exit>{tile.get('worldExitDirection','?')} (click to travel)")
         if tile.get("occupied"):      flags.append("occupied")
         if not tile.get("pathable", True): flags.append("impassable")

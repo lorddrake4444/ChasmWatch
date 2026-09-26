@@ -22,8 +22,9 @@ public class WorldTile
         this.Position = position;
     }
 
-    public void Generate(double openness)
+    public void Generate(SpawnSettings spawn)
     {
+        double openness = spawn.Openness;
         int seed = HashCode.Combine(Position.q, Position.r, Position.s, DateTime.UtcNow.Millisecond);
         Random rand = new Random(seed);
         int targetSize = rand.Next(64, 512);
@@ -97,6 +98,41 @@ public class WorldTile
         }
 
         PlaceWorldExits(rand);
+        SpawnEnemies(rand, spawn);
+    }
+
+    /// <summary>
+    /// Stationary enemy seeding: every board hex has a chance to spawn an
+    /// enemy, up to <see cref="SpawnSettings.MaxEnemies"/>. Exits stay clear
+    /// so traversal never strands, and the entrance stays clear so joining
+    /// never lands on an enemy.
+    /// </summary>
+    private void SpawnEnemies(Random rand, SpawnSettings spawn)
+    {
+        if (spawn.MaxEnemies <= 0 || spawn.EnemySpawnChance <= 0)
+            return;
+        var entrance = new HexagonalPos(0, 0, 0);
+        var candidates = Board.Values
+            .Where(t => t.Pathable && !t.IsWorldExit && !t.Position.Equals(entrance))
+            .ToList();
+        // Fisher-Yates shuffle so spawn positions are uniform, not scan-ordered.
+        for (int i = candidates.Count - 1; i > 0; i--)
+        {
+            int j = rand.Next(i + 1);
+            (candidates[i], candidates[j]) = (candidates[j], candidates[i]);
+        }
+        int spawned = 0;
+        foreach (var tile in candidates)
+        {
+            if (spawned >= spawn.MaxEnemies) break;
+            if (rand.NextDouble() >= spawn.EnemySpawnChance) continue;
+            var enemy = new Enemy();
+            enemy.CurrentTile = Position.Copy();
+            enemy.CurrentBoardPos = tile.Position.Copy();
+            tile.Occupant = enemy;
+            tile.Occupied = true;
+            spawned++;
+        }
     }
 
     private void PlaceWorldExits(Random rand)
@@ -339,6 +375,48 @@ public class WorldTile
             return true;
         }
         finally { _lock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Kills (deletes) the first enemy on a hex neighboring <paramref name="unit"/>.
+    /// The tile persists in memory, so the kill is permanent for late joiners.
+    /// Returns the slain enemy, or null when no enemy is adjacent.
+    /// </summary>
+    public Enemy? TryKillAdjacentEnemy(Unit unit)
+    {
+        _lock.EnterWriteLock();
+        try
+        {
+            var standing = FindOccupiedTileNoLock(unit);
+            if (standing == null) return null;
+            foreach (var neighborPos in HexagonalPos.GetNeighbors(standing.Position))
+            {
+                if (Board.TryGetValue(neighborPos, out var neighbor)
+                    && neighbor.Occupant is Enemy enemy)
+                {
+                    neighbor.Occupant = null;
+                    neighbor.Occupied = false;
+                    return enemy;
+                }
+            }
+            return null;
+        }
+        finally { _lock.ExitWriteLock(); }
+    }
+
+    public int CountEnemies()
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            int count = 0;
+            foreach (var tile in Board.Values)
+            {
+                if (tile.Occupant is Enemy) count++;
+            }
+            return count;
+        }
+        finally { _lock.ExitReadLock(); }
     }
 
     private BoardTile? FindOccupiedTileNoLock(Unit unit)

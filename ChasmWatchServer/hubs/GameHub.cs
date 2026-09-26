@@ -161,18 +161,25 @@ public class GameHub : Hub
         try
         {
             var result = _objectives.Interact(player, playerUnit, worldTilePos);
-            if (result.Outcome != ObjectiveService.InteractOutcome.Completed)
-            {
-                await Clients.Caller.SendAsync("SystemMessage", result.Message);
-                return;
-            }
-
             string roomName = worldTilePos.ToString();
-            await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username}: {result.Message}");
-            if (_state._WorldMap.TryGetTile(worldTilePos, out WorldTile? tile) && tile != null)
+            switch (result.Outcome)
             {
-                await Clients.Group(roomName).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
-                await SendQuestState(player);
+                case ObjectiveService.InteractOutcome.Completed:
+                    await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username}: {result.Message}");
+                    if (_state._WorldMap.TryGetTile(worldTilePos, out WorldTile? tile) && tile != null)
+                    {
+                        await Clients.Group(roomName).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
+                        await SendQuestState(player);
+                    }
+                    break;
+                case ObjectiveService.InteractOutcome.EnemyKilled:
+                    await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username}: {result.Message}");
+                    if (_state._WorldMap.TryGetTile(worldTilePos, out WorldTile? tileAfterKill) && tileAfterKill != null)
+                        await Clients.Group(roomName).SendAsync("ReceiveTileInfo", BuildBoardDto(tileAfterKill), BuildUnitDto(playerUnit));
+                    break;
+                default:
+                    await Clients.Caller.SendAsync("SystemMessage", result.Message);
+                    break;
             }
         }
         catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
@@ -235,6 +242,8 @@ public class GameHub : Hub
             b.Occupied,
             b.IsWorldExit,
             b.Interactable,
+            OccupantKind = b.Occupant is Enemy ? "enemy" : b.Occupant != null ? "player" : "none",
+            OccupantName = b.Occupant?.Name,
             WorldExitDirection = b.WorldExitDirection?.ToString(),
             Exits = b.exits.ToDictionary(e => e.Key.ToString(), e => e.Value),
         });
