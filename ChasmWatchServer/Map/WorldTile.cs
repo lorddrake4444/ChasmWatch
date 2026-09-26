@@ -22,54 +22,78 @@ public class WorldTile
         this.Position = position;
     }
 
-    public void Generate(SpawnSettings spawn)
+    public void Generate(SpawnSettings spawn, int? seedOverride = null)
     {
         double openness = spawn.Openness;
-        int seed = HashCode.Combine(Position.q, Position.r, Position.s, DateTime.UtcNow.Millisecond);
+        int seed = HashCode.Combine(Position.q, Position.r, Position.s, seedOverride ?? DateTime.UtcNow.Millisecond);
         Random rand = new Random(seed);
         int targetSize = rand.Next(64, 512);
+        int roomBudget = Math.Max(1, spawn.RoomSize);
+        int corridorBudget = Math.Max(0, spawn.CorridorLength);
 
         HexagonalPos entrance = new HexagonalPos(0, 0, 0);
-        Queue<(HexagonalPos pos, HexDirection? requiredExit)> frontier = new();
-        frontier.Enqueue((entrance, null));
+        int roomSeq = 0;
+        int corridorSeq = 0;
 
-        while (Board.Count < targetSize && frontier.Count > 0)
+        // First room at the entrance keeps spawn open for joins.
+        roomSeq++;
+        var (_, firstLast) = GrowRoom(rand, openness, Math.Min(roomBudget, targetSize), roomSeq, entrance, null);
+        HexagonalPos? chainTip = firstLast;
+
+        int guardCap = targetSize * 20 + 200;
+        int guard = 0;
+        bool capTip = false; // true when the previous site was a corridor needing a room cap
+        while (Board.Count < targetSize && guard++ < guardCap)
         {
-            var (pos, requiredExit) = frontier.Dequeue();
+            bool progressed = false;
+            // Cap sites at the remaining target so rooms can't overshoot it.
+            int remaining = Math.Max(1, targetSize - Board.Count);
+            int roomNow = Math.Max(1, Math.Min(roomBudget, remaining));
+            int corrNow = Math.Min(corridorBudget, remaining);
 
-            if (Board.ContainsKey(pos))
+            // Corridor site (skipped when CorridorLength == 0). Always seeded
+            // at a random frontier edge: chaining from the newest tip marches
+            // growth in one persistent direction instead of coiling.
+            if (corrNow > 0 && TryFindEdge(rand, null, out var corridorFrom, out var corridorDir))
             {
-                if (requiredExit != null)
-                    Board[pos].exits[requiredExit.Value] = true;
-                continue;
-            }
-
-            BoardTile tile = new BoardTile(pos, pathable: true, occupied: false);
-
-            if (requiredExit != null)
-                tile.exits[requiredExit.Value] = true;
-
-            foreach (HexDirection direction in DirectionVectors.Keys)
-            {
-                if (direction == requiredExit) continue;
-                tile.exits[direction] = rand.NextDouble() < openness;
-            }
-
-            Board[pos] = tile;
-
-            foreach (var (direction, isOpen) in tile.exits)
-            {
-                if (!isOpen) continue;
-                HexagonalPos neighbourPos = pos + DirectionVectors[direction];
-                HexDirection exitBackToUs = direction.Opposite();
-
-                if (Board.ContainsKey(neighbourPos))
+                Board[corridorFrom].exits[corridorDir] = true;
+                corridorSeq++;
+                HexagonalPos? corridorEnd = GrowCorridor(rand, -corridorSeq, corridorFrom, corridorDir, corrNow);
+                if (corridorEnd != null)
                 {
-                    Board[neighbourPos].exits[exitBackToUs] = true;
-                    continue;
+                    chainTip = corridorEnd;
+                    capTip = true;
+                    progressed = true;
                 }
-                frontier.Enqueue((neighbourPos, exitBackToUs));
             }
+
+            // Room site. Seeds at the chain tip only to cap a fresh corridor
+            // end; otherwise seeds at a random frontier edge. Always chaining
+            // from the tip marches growth in one persistent direction.
+            if (TryFindEdge(rand, capTip ? chainTip : null, out var roomFrom, out var roomDir))
+            {
+                Board[roomFrom].exits[roomDir] = true;
+                HexagonalPos roomSeed = roomFrom + DirectionVectors[roomDir];
+                if (!Board.ContainsKey(roomSeed))
+                {
+                    roomSeq++;
+                    var (added, last) = GrowRoom(rand, openness, roomNow, roomSeq, roomSeed, roomDir.Opposite());
+                    if (added > 0)
+                    {
+                        chainTip = last;
+                        progressed = true;
+                    }
+                }
+                else
+                {
+                    Board[roomSeed].exits[roomDir.Opposite()] = true;
+                    chainTip = roomSeed;
+                    progressed = true;
+                }
+                capTip = false;
+            }
+
+            if (!progressed) break; // fully enclosed: nothing borders unvisited space
         }
         foreach (var tile in Board.Values)
         {
@@ -99,6 +123,200 @@ public class WorldTile
 
         PlaceWorldExits(rand);
         SpawnEnemies(rand, spawn);
+    }
+
+    /// <summary>
+    /// Flood-fill room site capped at <paramref name="budget"/> new tiles.
+    /// Returns the tiles added and the last one placed (chain tip).
+    /// </summary>
+    private (int added, HexagonalPos? last) GrowRoom(Random rand, double openness, int budget, int siteId, HexagonalPos seed, HexDirection? requiredExit)
+    {
+        int added = 0;
+        HexagonalPos? last = null;
+        var visited = new HashSet<HexagonalPos> { seed };
+        var queue = new Queue<(HexagonalPos pos, HexDirection? req)>();
+        queue.Enqueue((seed, requiredExit));
+
+        while (queue.Count > 0 && added < budget)
+        {
+            var (pos, req) = queue.Dequeue();
+
+            if (Board.ContainsKey(pos))
+            {
+                if (req != null)
+                    Board[pos].exits[req.Value] = true;
+                continue;
+            }
+
+            BoardTile tile = new BoardTile(pos, pathable: true, occupied: false);
+            tile.SiteId = siteId;
+
+            if (req != null)
+                tile.exits[req.Value] = true;
+
+            foreach (HexDirection direction in DirectionVectors.Keys)
+            {
+                if (direction == req) continue;
+                tile.exits[direction] = rand.NextDouble() < openness;
+            }
+
+            Board[pos] = tile;
+            added++;
+            last = pos;
+
+            // Shuffle expansion order per tile: .NET dictionaries enumerate in
+            // fixed hash-bucket order, so a fixed expansion sequence would skew
+            // every room toward the same compass direction (and chained rooms
+            // would march that way). Shuffling decorrelates growth.
+            var expandDirs = new List<HexDirection>(tile.exits.Keys);
+            for (int i = expandDirs.Count - 1; i > 0; i--)
+            {
+                int j = rand.Next(i + 1);
+                (expandDirs[i], expandDirs[j]) = (expandDirs[j], expandDirs[i]);
+            }
+
+            foreach (var direction in expandDirs)
+            {
+                if (!tile.exits[direction]) continue;
+                HexagonalPos neighbourPos = pos + DirectionVectors[direction];
+                HexDirection exitBackToUs = direction.Opposite();
+
+                if (Board.ContainsKey(neighbourPos))
+                {
+                    Board[neighbourPos].exits[exitBackToUs] = true;
+                    continue;
+                }
+                if (visited.Add(neighbourPos))
+                    queue.Enqueue((neighbourPos, exitBackToUs));
+            }
+        }
+        return (added, last);
+    }
+
+    /// <summary>
+    /// Self-avoiding corridor walk of up to <paramref name="maxLength"/> steps.
+    /// Winding comes from <see cref="PickCorridorDir"/> (straight preferred,
+    /// then turns). Stepping onto board ends the segment with a join so areas
+    /// stay open to one another. Returns the endpoint for chaining.
+    /// </summary>
+    private HexagonalPos? GrowCorridor(Random rand, int siteId, HexagonalPos from, HexDirection initialDir, int maxLength)
+    {
+        // Caller guarantees from is on the board and initialDir leads outside.
+        HexagonalPos pos = from + DirectionVectors[initialDir];
+        HexDirection prevDir = initialDir;
+        HexagonalPos? last = null;
+        int steps = 0;
+
+        while (steps < maxLength)
+        {
+            if (Board.ContainsKey(pos))
+            {
+                Board[pos].exits[prevDir.Opposite()] = true;
+                return pos;
+            }
+
+            var tile = new BoardTile(pos, pathable: true, occupied: false);
+            tile.SiteId = siteId;
+            tile.exits[prevDir.Opposite()] = true;
+
+            HexDirection next = PickCorridorDir(rand, prevDir, prevDir.Opposite());
+            tile.exits[next] = true;
+            Board[pos] = tile;
+            last = pos;
+            steps++;
+
+            HexagonalPos ahead = pos + DirectionVectors[next];
+            if (Board.ContainsKey(ahead))
+            {
+                Board[ahead].exits[next.Opposite()] = true;
+                return ahead;
+            }
+            pos = ahead;
+            prevDir = next;
+        }
+        return last;
+    }
+
+    private static readonly HexDirection[] ClockwiseRing =
+        [HexDirection.UP, HexDirection.RIGHTUP, HexDirection.RIGHTDOWN,
+         HexDirection.DOWN, HexDirection.LEFTDOWN, HexDirection.LEFTUP];
+
+    /// <summary>
+    /// Next corridor heading: straight heavily favored, +-60 degree turns
+    /// moderate, sharper bends rare. Never U-turns (back is excluded).
+    /// </summary>
+    private static HexDirection PickCorridorDir(Random rand, HexDirection forward, HexDirection back)
+    {
+        int fi = Array.IndexOf(ClockwiseRing, forward);
+        var options = new List<(HexDirection dir, double weight)>();
+        for (int i = 0; i < ClockwiseRing.Length; i++)
+        {
+            HexDirection d = ClockwiseRing[i];
+            if (d == back) continue;
+            int ringDist = Math.Min((i - fi + ClockwiseRing.Length) % ClockwiseRing.Length,
+                                    (fi - i + ClockwiseRing.Length) % ClockwiseRing.Length);
+            double weight = ringDist switch { 0 => 0.50, 1 => 0.17, _ => 0.08 };
+            options.Add((d, weight));
+        }
+        double roll = rand.NextDouble() * options.Sum(o => o.weight);
+        foreach (var (d, w) in options)
+        {
+            roll -= w;
+            if (roll <= 0) return d;
+        }
+        return options[^1].dir;
+    }
+
+    /// <summary>
+    /// Finds a board tile bordering unvisited space, preferring
+    /// <paramref name="preferred"/> (chain tip). False when fully enclosed.
+    /// </summary>
+    private bool TryFindEdge(Random rand, HexagonalPos? preferred, out HexagonalPos from, out HexDirection dir)
+    {
+        from = null!;
+        dir = default;
+        if (preferred != null && Board.ContainsKey(preferred)
+            && TryRandomUnvisitedDir(rand, preferred, out dir))
+        {
+            from = preferred;
+            return true;
+        }
+        HexagonalPos? pick = null;
+        int seen = 0;
+        foreach (var (pos, _) in Board)
+        {
+            bool bordersOutside = false;
+            foreach (var neighbor in HexagonalPos.GetNeighbors(pos))
+            {
+                if (!Board.ContainsKey(neighbor)) { bordersOutside = true; break; }
+            }
+            if (!bordersOutside) continue;
+            seen++;
+            if (rand.Next(seen) == 0) pick = pos; // reservoir sampling
+        }
+        if (pick == null || !TryRandomUnvisitedDir(rand, pick, out dir)) return false;
+        from = pick;
+        return true;
+    }
+
+    private bool TryRandomUnvisitedDir(Random rand, HexagonalPos from, out HexDirection dir)
+    {
+        var dirs = new List<HexDirection>(DirectionVectors.Keys);
+        for (int i = dirs.Count - 1; i > 0; i--)
+        {
+            int j = rand.Next(i + 1);
+            (dirs[i], dirs[j]) = (dirs[j], dirs[i]);
+        }
+        foreach (var d in dirs)
+        {
+            if (!Board.ContainsKey(from + DirectionVectors[d]))
+            {
+                dir = d;
+                return true;
+            }
+        }
+        dir = default;
+        return false;
     }
 
     /// <summary>

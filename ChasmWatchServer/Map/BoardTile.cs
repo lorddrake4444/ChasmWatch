@@ -5,6 +5,13 @@ public class BoardTile : HexNode
     public HexDirection? WorldExitDirection { get; set; } = null;
     public bool Interactable { get; set; } = false;
 
+    /// <summary>
+    /// Growth site that created this tile. Positive = room site, negative =
+    /// corridor site (magnitude = segment index). Diagnostics only; never sent
+    /// to clients.
+    /// </summary>
+    internal int SiteId { get; set; } = 0;
+
     public Dictionary<HexDirection, bool> exits = new()
     {
         { HexDirection.UP,        false },
