@@ -13,7 +13,7 @@ public class WorldMap
     /// </summary>
     public Biome DefaultBiome { get; set; } = new Biome("Default", new SpawnSettings
     {
-        RottenTileChance = 0.1,
+        RottenTileChance = 0.01,
     });
 
     /// <summary>
