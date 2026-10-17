@@ -54,6 +54,7 @@ public class GameHub : Hub
             if (player.ActiveObjective == null)
                 _objectives.AssignObjective(player, playerUnit.CurrentTile ?? pos);
             await SendQuestProgress(player, tile);
+            await BroadcastTurnState(tile);
         }
         catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
         {
@@ -78,15 +79,28 @@ public class GameHub : Hub
 
         try
         {
-            WorldTile? tile = _state.MoveUnit(worldTilePos, destination, playerUnit);
-            if (tile == null)
+            WorldTile? tile = _state.GetTile(worldTilePos);
+            if (tile?.Encounter is { } encounter && !encounter.TryValidateTurn(playerUnit, out var turnError))
+            {
+                await RejectTurn(turnError);
+                return;
+            }
+
+            MoveResult? move = _state.MoveUnit(worldTilePos, destination, playerUnit);
+            if (move == null)
             {
                 await Clients.Caller.SendAsync("SystemMessage", "Move failed.");
                 return;
             }
-            await Clients.Group(tile.Position.ToString()).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
-            await SendExitPromptIfOnExit(worldTilePos, tile, playerUnit);
-            await SendQuestProgress(player, tile);
+
+            WorldTile moved = move.Tile;
+            // Each cell stepped costs 1, pushing the mover later in the turn order.
+            moved.Encounter?.ApplyCost(playerUnit, move.Cost);
+
+            await Clients.Group(moved.Position.ToString()).SendAsync("ReceiveTileInfo", BuildBoardDto(moved), BuildUnitDto(playerUnit));
+            await SendExitPromptIfOnExit(worldTilePos, moved, playerUnit);
+            await SendQuestProgress(player, moved);
+            await BroadcastTurnState(moved);
         }
         catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
         {
@@ -118,6 +132,16 @@ public class GameHub : Hub
 
         try
         {
+            WorldTile? oldTile = _state.GetTile(currentWorldTilePos);
+            if (oldTile?.Encounter is { } encounter && !encounter.TryValidateTurn(playerUnit, out var turnError))
+            {
+                await RejectTurn(turnError);
+                return;
+            }
+
+            // Stepping through the exit costs one, charged to the tile left behind.
+            oldTile?.Encounter?.ApplyCost(playerUnit, Encounter.TraverseCost);
+
             TraverseResult result = _state.TraverseWorldExit(currentWorldTilePos, playerUnit);
             string oldRoom = currentWorldTilePos.ToString();
             string newRoom = result.NeighborPos.ToString();
@@ -130,6 +154,8 @@ public class GameHub : Hub
             await Clients.Group(newRoom).SendAsync("ReceiveMessage", "System", $"{username} entered tile {newRoom} from {oldRoom}.");
             await Clients.Group(newRoom).SendAsync("ReceiveTileInfo", BuildBoardDto(result.NewTile), BuildUnitDto(playerUnit));
             await SendQuestProgress(player, result.NewTile);
+            await BroadcastTurnState(result.OldTile);
+            await BroadcastTurnState(result.NewTile);
         }
         catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
         {
@@ -160,13 +186,20 @@ public class GameHub : Hub
 
         try
         {
+            WorldTile? tile = _state.GetTile(worldTilePos);
+            if (tile?.Encounter is { } encounter && !encounter.TryValidateTurn(playerUnit, out var turnError))
+            {
+                await RejectTurn(turnError);
+                return;
+            }
+
             var result = _objectives.Interact(player, playerUnit, worldTilePos);
             string roomName = worldTilePos.ToString();
             switch (result.Outcome)
             {
                 case ObjectiveService.InteractOutcome.Completed:
                     await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username}: {result.Message}");
-                    if (_state._WorldMap.TryGetTile(worldTilePos, out WorldTile? tile) && tile != null)
+                    if (tile != null)
                     {
                         await Clients.Group(roomName).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
                         await SendQuestState(player);
@@ -174,18 +207,65 @@ public class GameHub : Hub
                     break;
                 case ObjectiveService.InteractOutcome.EnemyKilled:
                     await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username}: {result.Message}");
-                    if (_state._WorldMap.TryGetTile(worldTilePos, out WorldTile? tileAfterKill) && tileAfterKill != null)
-                        await Clients.Group(roomName).SendAsync("ReceiveTileInfo", BuildBoardDto(tileAfterKill), BuildUnitDto(playerUnit));
+                    if (tile != null)
+                        await Clients.Group(roomName).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), BuildUnitDto(playerUnit));
                     break;
                 default:
                     await Clients.Caller.SendAsync("SystemMessage", result.Message);
                     break;
             }
+
+            // A real interaction (quest item or attack) consumes 5 from the turn counter.
+            if (result.Outcome is ObjectiveService.InteractOutcome.Completed
+                or ObjectiveService.InteractOutcome.EnemyKilled)
+                tile?.Encounter?.ApplyCost(playerUnit, Encounter.InteractCost);
+
+            if (tile != null)
+                await BroadcastTurnState(tile);
         }
         catch (Exception ex) when (ex is InvalidOperationException || ex is KeyNotFoundException || ex is ArgumentException)
         {
             await Clients.Caller.SendAsync("SystemMessage", $"Interact failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Voluntarily ends the player's turn. Passing is free once they have spent
+    /// at least <see cref="Encounter.FreePassThreshold"/>; otherwise it costs
+    /// <see cref="Encounter.PassCost"/> so the cursor still moves on.
+    /// </summary>
+    public async Task PassTurn(HexagonalPos worldTilePos)
+    {
+        string username = Username();
+        var player = CurrentPlayer();
+        if (player == null)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", "Invalid session.");
+            return;
+        }
+        if (player.ActiveChar == null)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", "No active character.");
+            return;
+        }
+        Unit playerUnit = player.ActiveChar;
+
+        WorldTile? tile = _state.GetTile(worldTilePos);
+        if (tile?.Encounter is not { } encounter)
+        {
+            await Clients.Caller.SendAsync("SystemMessage", "There is no turn to pass here.");
+            return;
+        }
+
+        if (!encounter.TryValidateTurn(playerUnit, out var turnError))
+        {
+            await RejectTurn(turnError);
+            return;
+        }
+
+        encounter.Pass(playerUnit);
+        await Clients.Group(tile.Position.ToString()).SendAsync("ReceiveMessage", "System", $"{username} passes their turn.");
+        await BroadcastTurnState(tile);
     }
 
     /// <summary>
@@ -247,6 +327,23 @@ public class GameHub : Hub
             WorldExitDirection = b.WorldExitDirection?.ToString(),
             Exits = b.exits.ToDictionary(e => e.Key.ToString(), e => e.Value),
         });
+
+    /// <summary>
+    /// Pushes the cell's turn order to everyone in it (active: false when the
+    /// cell is no longer in turn combat).
+    /// </summary>
+    private async Task BroadcastTurnState(WorldTile tile)
+    {
+        Encounter? encounter = tile.Encounter;
+        TurnState state = encounter != null
+            ? encounter.BuildState()
+            : new TurnState(false, 0, Encounter.Allowance, null, null, Array.Empty<TurnSlotState>());
+        await Clients.Group(tile.Position.ToString()).SendAsync("TurnState", state);
+    }
+
+    /// <summary>Tells the caller their action was refused because it is not their turn.</summary>
+    private Task RejectTurn(string? message) =>
+        Clients.Caller.SendAsync("TurnRejected", message ?? "It's not your turn.");
 
     private static object BuildUnitDto(Unit unit) => new
     {

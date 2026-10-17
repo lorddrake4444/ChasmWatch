@@ -326,6 +326,8 @@ class App(tk.Tk):
         self.chat_tabs        = {}
         self._exit_prompt_open = False
         self.objective_tile   = None
+        self.my_unit_id       = None
+        self.turn_state       = None
 
         self._build_login()
 
@@ -492,6 +494,10 @@ class App(tk.Tk):
                   bg=BG4, fg=GOLD2, relief=tk.FLAT, bd=0,
                   activebackground=GOLD, activeforeground=TEXT_BRT,
                   cursor="hand2", command=self._interact).pack(side=tk.LEFT, padx=8)
+        tk.Button(foot, text="PASS [P]", font=("Courier New",8,"bold"),
+                  bg=BG4, fg=TEXT_DIM, relief=tk.FLAT, bd=0,
+                  activebackground=BG3, activeforeground=TEXT_BRT,
+                  cursor="hand2", command=self._pass).pack(side=tk.LEFT, padx=8)
         for col, lbl in [(HEX_PLAYER,"you"),(HEX_EXIT,"exit"),(HEX_INTERACT,"[!]"),
                          (HEX_ENEMY,"enemy"),
                          (HEX_OCC,"occupied"),(HEX_EMPTY,"open"),(HEX_HOVER,"hover")]:
@@ -515,6 +521,9 @@ class App(tk.Tk):
         self.completed_lbl = tk.Label(side, text="completed: 0",
                                       font=("Courier New",8), fg=TEXT_DIM, bg=BG2)
         self.completed_lbl.pack(anchor="w", padx=10, pady=(0,4))
+        self.turn_lbl = tk.Label(side, text="", font=("Courier New",8), fg=TEXT_DIM,
+                                 bg=BG2, wraplength=280, justify="left")
+        self.turn_lbl.pack(anchor="w", padx=10, pady=(0,4))
         tk.Frame(side, bg=BORDER, height=1).pack(fill=tk.X, padx=4)
         tk.Label(side, text="COMMS", font=("Courier New",8,"bold"),
                  fg=TEXT_DIM, bg=BG2).pack(anchor="w", padx=10, pady=(8,2))
@@ -534,6 +543,8 @@ class App(tk.Tk):
 
         self.bind("<KeyPress-e>", self._on_key_interact)
         self.bind("<KeyPress-E>", self._on_key_interact)
+        self.bind("<KeyPress-p>", self._on_key_pass)
+        self.bind("<KeyPress-P>", self._on_key_pass)
 
     def _coord_entry(self, parent, label, default):
         tk.Label(parent, text=label, font=("Courier New",8),
@@ -641,6 +652,12 @@ class App(tk.Tk):
         elif target == "QuestState":
             if args:
                 self._on_quest_state(args[0])
+        elif target == "TurnState":
+            if args:
+                self._on_turn_state(args[0])
+        elif target == "TurnRejected":
+            msg = args[0] if args else "It's not your turn."
+            self.status_lbl.config(text=f"x {msg}", fg=DANGER2)
         elif target == "ReceiveMessage":
             s, m = args[0], args[1]
             tab = self._tile_key(self.current_tile_pos)
@@ -672,6 +689,9 @@ class App(tk.Tk):
             return
         mine = self._unit_is_mine(unit)
         if mine and isinstance(unit, dict):
+            uid = unit.get("id", unit.get("ID"))
+            if uid is not None:
+                self.my_unit_id = str(uid)
             tile_pos = self._pos_tuple(unit.get("tilePos", unit.get("TilePos")))
             board_pos = self._pos_tuple(unit.get("boardPos", unit.get("BoardPos")))
             if tile_pos is not None and tile_pos != self.current_tile_pos:
@@ -716,6 +736,8 @@ class App(tk.Tk):
         self._switch_tab(group)
         self.pos_label.config(text=f"tile {q},{r},{s}", fg=TEXT)
         self.status_lbl.config(text=status, fg=TEXT_DIM)
+        if hasattr(self, "turn_lbl"):
+            self.turn_lbl.config(text="", fg=TEXT_DIM)
 
     # ── World-exit prompt ─────────────────────────────────────────────────
 
@@ -774,6 +796,12 @@ class App(tk.Tk):
             return  # typing in chat/login — don't steal "e"
         self._interact()
 
+    def _on_key_pass(self, event=None):
+        focused = self.focus_get()
+        if isinstance(focused, (tk.Entry, tk.Text)):
+            return  # typing in chat/login — don't steal "p"
+        self._pass()
+
     def _interact(self):
         if not self.game_ws or not self.current_tile_pos:
             return
@@ -782,6 +810,51 @@ class App(tk.Tk):
             "type": 1, "target": "Interact",
             "arguments": [{"q": wq, "r": wr, "s": ws}, None]
         }) + RECORD_SEPARATOR)
+
+    def _pass(self):
+        if not self.game_ws or not self.current_tile_pos:
+            return
+        wq, wr, ws = self.current_tile_pos
+        self.game_ws.send(json.dumps({
+            "type": 1, "target": "PassTurn",
+            "arguments": [{"q": wq, "r": wr, "s": ws}]
+        }) + RECORD_SEPARATOR)
+
+    def _on_turn_state(self, state):
+        self.turn_state = state
+        if not hasattr(self, "turn_lbl"):
+            return
+        if not state.get("active", state.get("Active", False)):
+            self.turn_lbl.config(text="", fg=TEXT_DIM)
+            return
+
+        order = state.get("order", state.get("Order")) or []
+        cur_id = state.get("currentActorId", state.get("CurrentActorId"))
+        cur_name = state.get("currentActorName", state.get("CurrentActorName")) or "?"
+        cursor = state.get("cursor", state.get("Cursor", 0))
+        allowance = state.get("allowance", state.get("Allowance", 20))
+        is_mine = (cur_id is not None and self.my_unit_id is not None
+                   and str(cur_id) == str(self.my_unit_id))
+        who = "YOUR TURN" if is_mine else f"{cur_name} to act"
+
+        parts = []
+        my_spent = 0
+        for s in order:
+            nm = s.get("name", s.get("Name")) or "?"
+            c = s.get("counter", s.get("Counter", 0))
+            sp = s.get("spent", s.get("Spent", 0))
+            cur = s.get("isCurrent", s.get("IsCurrent"))
+            mark = "*" if cur else ""
+            tag = "x" if s.get("isEnemy", s.get("IsEnemy", False)) else "@"
+            if cur:
+                parts.append(f"{tag}{nm}:{c} [{sp}/{allowance}]{mark}")
+                if is_mine:
+                    my_spent = sp
+            else:
+                parts.append(f"{tag}{nm}:{c}{mark}")
+        self.turn_lbl.config(
+            text=f"TURN {cursor} — {who} ({my_spent}/{allowance})\n" + "  ".join(parts),
+            fg=ACCENT3 if is_mine else GOLD2)
 
     # ── Actions ───────────────────────────────────────────────────────────
 

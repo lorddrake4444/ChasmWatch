@@ -19,6 +19,14 @@ public class SpawnSettings
     public double RottenTileChance { get; set; } = 0.0;
 
     /// <summary>
+    /// Chance that the whole world cell rolls "peaceful" at generation. A
+    /// peaceful tile spawns no enemies at all, so it never enters turn-based
+    /// combat. Mirrors <see cref="RottenTileChance"/>; 0 (the default) never
+    /// rolls peaceful.
+    /// </summary>
+    public double PeacefulTileChance { get; set; } = 0.0;
+
+    /// <summary>
     /// Max hexes per room site. Rooms seeded adjacently merge into open space.
     /// </summary>
     public int RoomSize { get; set; } = 100;

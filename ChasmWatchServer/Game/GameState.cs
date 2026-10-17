@@ -4,6 +4,9 @@ public sealed record TraverseResult(
     HexagonalPos NeighborPos,
     HexDirection ExitDirection);
 
+/// <summary>Successful move: the tile the unit now occupies and the cells stepped.</summary>
+public sealed record MoveResult(WorldTile Tile, int Cost);
+
 public class GameState
 {
     public WorldMap _WorldMap { get; }
@@ -11,6 +14,9 @@ public class GameState
     {
         _WorldMap = worldMap;
     }
+
+    public WorldTile? GetTile(HexagonalPos worldPos) =>
+        _WorldMap.TryGetTile(worldPos, out var tile) ? tile : null;
 
     /// <summary>
     /// Places <paramref name="unit"/> on <paramref name="worldPos"/>. If the unit
@@ -44,9 +50,14 @@ public class GameState
             && previousTile != null && !ReferenceEquals(previousTile, tile))
         {
             previousTile.RemoveUnit(unit);
+            previousTile.RemoveFromEncounter(unit);
         }
 
         unit.CurrentTile = tile.Position.Copy();
+
+        // Join turn combat when this cell has enemies; no-op otherwise.
+        tile.EnrollIfActive(unit);
+
         return tile;
     }
 
@@ -56,7 +67,7 @@ public class GameState
     /// Clicking the tile the unit already stands on is a no-op success so
     /// callers can re-prompt for world exits.
     /// </summary>
-    public WorldTile? MoveUnit(HexagonalPos worldTilePos, HexagonalPos destination, Unit unit)
+    public MoveResult? MoveUnit(HexagonalPos worldTilePos, HexagonalPos destination, Unit unit)
     {
         if (unit.CurrentTile == null || !unit.CurrentTile.Equals(worldTilePos))
             throw new InvalidOperationException("Unit is not on the specified tile");
@@ -67,11 +78,11 @@ public class GameState
             throw new InvalidOperationException("Unit is not on the specified tile");
 
         if (destination.Equals(unit.CurrentBoardPos))
-            return tile;
+            return new MoveResult(tile, 0);
 
-        if (!tile.TryMoveUnit(unit, destination, Math.Max(1, unit.Speed)))
+        if (!tile.TryMoveUnit(unit, destination, Math.Max(1, unit.Speed), out int cost))
             return null;
-        return tile;
+        return new MoveResult(tile, cost);
     }
 
     /// <summary>
@@ -98,6 +109,9 @@ public class GameState
     public void RemoveUnitFromTile(HexagonalPos worldTilePos, Unit unit)
     {
         if (_WorldMap.TryGetTile(worldTilePos, out var tile) && tile != null)
+        {
             tile.RemoveUnit(unit);
+            tile.RemoveFromEncounter(unit);
+        }
     }
 }

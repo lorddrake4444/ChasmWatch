@@ -24,6 +24,22 @@ public class WorldTile
     /// </summary>
     public bool Rotten { get; set; } = false;
 
+    /// <summary>
+    /// True when generation rolled this whole world cell peaceful. Every board
+    /// hex is tagged <see cref="BoardTile.Peaceful"/> and no enemies spawn, so
+    /// a peaceful cell never enters turn-based combat.
+    /// </summary>
+    public bool Peaceful { get; set; } = false;
+
+    private readonly object _encounterLock = new();
+
+    /// <summary>
+    /// Live turn-based encounter for this cell, or null when the cell is not in
+    /// turn-based combat. Combat runs only while enemies exist; managed by
+    /// <see cref="GameState"/>.
+    /// </summary>
+    public Encounter? Encounter { get; private set; }
+
     public WorldTile(HexagonalPos position)
     {
         this.Position = position;
@@ -44,19 +60,29 @@ public class WorldTile
         // 0 (the default) never rolls rotten.
         Rotten = settings.RottenTileChance > 0 && rand.NextDouble() < settings.RottenTileChance;
 
+        // Peaceful roll: a peaceful cell spawns no enemies at all. Mirrors the
+        // rotten roll; 0 (the default) never rolls peaceful.
+        Peaceful = settings.PeacefulTileChance > 0 && rand.NextDouble() < settings.PeacefulTileChance;
+
         GenerationResult result = biome.GenerateShape != null
             ? biome.GenerateShape(this, rand, settings, seed)
             : GenerateShapeDefault(rand, settings, seed);
 
-        // Tag the whole board so rot is visible per hex, not just per tile.
+        // Tag the whole board so rot/peace is visible per hex, not just per tile.
         if (Rotten)
             foreach (var tile in Board.Values) tile.Rotten = true;
+        if (Peaceful)
+            foreach (var tile in Board.Values) tile.Peaceful = true;
 
         if (biome.PlaceWorldExits != null) biome.PlaceWorldExits(this, rand);
         else PlaceWorldExitsDefault(rand);
 
-        if (biome.SpawnEnemies != null) biome.SpawnEnemies(this, rand, settings);
-        else SpawnEnemiesDefault(rand, settings);
+        // Peaceful cells never spawn enemies, so they never enter turn combat.
+        if (!Peaceful)
+        {
+            if (biome.SpawnEnemies != null) biome.SpawnEnemies(this, rand, settings);
+            else SpawnEnemiesDefault(rand, settings);
+        }
 
         return result;
     }
@@ -64,6 +90,61 @@ public class WorldTile
     /// <summary>Back-compat wrapper: generates with a throwaway biome.</summary>
     public void Generate(SpawnSettings spawn, int? seedOverride = null) =>
         Generate(new Biome("Legacy", spawn), seedOverride);
+
+    /// <summary>True when any board hex is occupied by an <see cref="Enemy"/>.</summary>
+    public bool HasEnemies()
+    {
+        _lock.EnterReadLock();
+        try { return Board.Values.Any(t => t.Occupant is Enemy); }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>Snapshot of every unit currently standing on this cell's board.</summary>
+    public List<Unit> GetUnits()
+    {
+        _lock.EnterReadLock();
+        try { return Board.Values.Select(t => t.Occupant).OfType<Unit>().ToList(); }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Brings <paramref name="unit"/> into turn combat. When the cell has
+    /// enemies and no encounter is running, one is created and every unit on
+    /// the board rolls initiative; otherwise the unit joins as a late joiner.
+    /// Does nothing on a cell with no enemies (free movement).
+    /// </summary>
+    public void EnrollIfActive(Unit unit)
+    {
+        lock (_encounterLock)
+        {
+            if (Encounter == null)
+            {
+                if (!HasEnemies()) return;
+                var encounter = new Encounter();
+                encounter.Start(GetUnits());
+                Encounter = encounter;
+            }
+            else
+            {
+                Encounter.EnrollLate(unit);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drops <paramref name="unit"/> from the encounter. Combat ends (and the
+    /// cell returns to free movement) once either side is gone.
+    /// </summary>
+    public void RemoveFromEncounter(Unit unit)
+    {
+        lock (_encounterLock)
+        {
+            if (Encounter == null) return;
+            Encounter.Remove(unit);
+            if (!Encounter.HasEnemies || !Encounter.HasPlayers)
+                Encounter = null;
+        }
+    }
 
     /// <summary>
     /// Default shape step: carves rooms and corridors onto <see cref="Board"/>
@@ -374,6 +455,8 @@ public class WorldTile
     /// </summary>
     public void SpawnEnemiesDefault(Random rand, SpawnSettings spawn)
     {
+        if (Peaceful)
+            return;
         if (spawn.MaxEnemies <= 0 || spawn.EnemySpawnChance <= 0)
             return;
         var entrance = new HexagonalPos(0, 0, 0);
@@ -491,11 +574,13 @@ public class WorldTile
 
     /// <summary>
     /// Validates ownership, destination walkability, and range (BFS up to
-    /// <paramref name="maxSteps"/>). Returns false for blocked/out-of-range
+    /// <paramref name="maxSteps"/>). <paramref name="cost"/> receives the number
+    /// of cells stepped (1 per cell). Returns false for blocked/out-of-range
     /// moves; callers treat that as "Move failed", not an error.
     /// </summary>
-    public bool TryMoveUnit(Unit unit, HexagonalPos destination, int maxSteps)
+    public bool TryMoveUnit(Unit unit, HexagonalPos destination, int maxSteps, out int cost)
     {
+        cost = 0;
         _lock.EnterWriteLock();
         try
         {
@@ -510,8 +595,9 @@ public class WorldTile
             if (HexagonalPos.HexDistance(unit.CurrentBoardPos, destination) > maxSteps)
                 return false;
 
-            if (!IsReachableNoLock(unit.CurrentBoardPos, destination, maxSteps))
+            if (!TryMeasurePathNoLock(unit.CurrentBoardPos, destination, maxSteps, out int steps))
                 return false;
+            cost = steps;
 
             currentTile.Occupant = null;
             currentTile.Occupied = false;
@@ -722,10 +808,22 @@ public class WorldTile
         return false;
     }
 
-    private bool IsReachableNoLock(HexagonalPos start, HexagonalPos end, int maxSteps)
+    /// <summary>
+    /// BFS shortest path from <paramref name="start"/> to <paramref name="end"/>
+    /// over pathable, unoccupied hexes (the destination may be the only
+    /// occupied step). <paramref name="cost"/> receives the number of steps.
+    /// </summary>
+    private bool TryMeasurePathNoLock(HexagonalPos start, HexagonalPos end, int maxSteps, out int cost)
     {
+        cost = 0;
+        if (start.Equals(end)) return true;
+
         if (maxSteps <= 1)
-            return HexagonalPos.HexDistance(start, end) <= 1;
+        {
+            int direct = HexagonalPos.HexDistance(start, end);
+            if (direct <= 1) { cost = direct; return true; }
+            return false;
+        }
 
         var visited = new HashSet<HexagonalPos> { start };
         var queue = new Queue<(HexagonalPos pos, int steps)>();
@@ -741,7 +839,7 @@ public class WorldTile
                 if (!Board.TryGetValue(next, out var tile)) continue;
                 if (!tile.Pathable) continue;
                 if (tile.Occupied && !next.Equals(end)) continue;
-                if (next.Equals(end)) return true;
+                if (next.Equals(end)) { cost = steps + 1; return true; }
                 visited.Add(next);
                 queue.Enqueue((next, steps + 1));
             }

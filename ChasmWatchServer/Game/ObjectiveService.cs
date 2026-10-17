@@ -113,7 +113,10 @@ public class ObjectiveService
         {
             Enemy? slain = tile.TryKillAdjacentEnemy(unit);
             if (slain != null)
+            {
+                tile.RemoveFromEncounter(slain);
                 return new InteractResult(InteractOutcome.EnemyKilled, $"{slain.Name} destroyed. ({tile.CountEnemies()} remain on this tile.)");
+            }
             return new InteractResult(InteractOutcome.NothingHere, "Nothing to interact with here.");
         }
 

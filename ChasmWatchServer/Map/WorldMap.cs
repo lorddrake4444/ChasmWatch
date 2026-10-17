@@ -14,6 +14,7 @@ public class WorldMap
     public Biome DefaultBiome { get; set; } = new Biome("Default", new SpawnSettings
     {
         RottenTileChance = 0.01,
+        PeacefulTileChance = 0.1,
     });
 
     /// <summary>
