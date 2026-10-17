@@ -22,11 +22,41 @@ public class WorldTile
         this.Position = position;
     }
 
-    public void Generate(SpawnSettings spawn, int? seedOverride = null)
+    /// <summary>
+    /// Generates this tile with the biome's tuning and hooks. Any hook the
+    /// biome leaves null falls back to the default step below.
+    /// </summary>
+    public GenerationResult Generate(Biome biome, int? seedOverride = null)
     {
-        double openness = spawn.Openness;
+        SpawnSettings settings = biome.Settings;
         int seed = HashCode.Combine(Position.q, Position.r, Position.s, seedOverride ?? DateTime.UtcNow.Millisecond);
         Random rand = new Random(seed);
+
+        GenerationResult result = biome.GenerateShape != null
+            ? biome.GenerateShape(this, rand, settings, seed)
+            : GenerateShapeDefault(rand, settings, seed);
+
+        if (biome.PlaceWorldExits != null) biome.PlaceWorldExits(this, rand);
+        else PlaceWorldExitsDefault(rand);
+
+        if (biome.SpawnEnemies != null) biome.SpawnEnemies(this, rand, settings);
+        else SpawnEnemiesDefault(rand, settings);
+
+        return result;
+    }
+
+    /// <summary>Back-compat wrapper: generates with a throwaway biome.</summary>
+    public void Generate(SpawnSettings spawn, int? seedOverride = null) =>
+        Generate(new Biome("Legacy", spawn), seedOverride);
+
+    /// <summary>
+    /// Default shape step: carves rooms and corridors onto <see cref="Board"/>
+    /// until the target size is reached, then heals orphaned doors. Returns the
+    /// generation outcome so custom hooks can chain off it.
+    /// </summary>
+    public GenerationResult GenerateShapeDefault(Random rand, SpawnSettings spawn, int seed)
+    {
+        double openness = spawn.Openness;
         int targetSize = rand.Next(64, 512);
         int roomBudget = Math.Max(1, spawn.RoomSize);
         int corridorBudget = Math.Max(0, spawn.CorridorLength);
@@ -121,8 +151,7 @@ public class WorldTile
             }
         }
 
-        PlaceWorldExits(rand);
-        SpawnEnemies(rand, spawn);
+        return new GenerationResult(seed, entrance, Board.Count);
     }
 
     /// <summary>
@@ -325,7 +354,7 @@ public class WorldTile
     /// so traversal never strands, and the entrance stays clear so joining
     /// never lands on an enemy.
     /// </summary>
-    private void SpawnEnemies(Random rand, SpawnSettings spawn)
+    public void SpawnEnemiesDefault(Random rand, SpawnSettings spawn)
     {
         if (spawn.MaxEnemies <= 0 || spawn.EnemySpawnChance <= 0)
             return;
@@ -353,7 +382,7 @@ public class WorldTile
         }
     }
 
-    private void PlaceWorldExits(Random rand)
+    public void PlaceWorldExitsDefault(Random rand)
     {
         foreach (var (direction, vector) in DirectionVectors)
         {

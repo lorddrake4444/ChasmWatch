@@ -4,6 +4,7 @@ public class BoardTile : HexNode
     public bool IsWorldExit { get; set; } = false;
     public HexDirection? WorldExitDirection { get; set; } = null;
     public bool Interactable { get; set; } = false;
+    public bool Rotten { get; set; } = false;
 
     /// <summary>
     /// Growth site that created this tile. Positive = room site, negative =
