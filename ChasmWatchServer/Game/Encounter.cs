@@ -3,12 +3,13 @@
 /// unit in the cell sits on a number line; whoever has the lowest counter acts
 /// next. Each turn a unit has an <see cref="Allowance"/> to spend on actions;
 /// every cost is added to both this turn's spending and its counter, pushing
-/// them later. Once the allowance is used up the turn ends on its own. Enemies
-/// simply pass (+<see cref="EnemyPassCost"/>).
+/// them later. Once the allowance is used up the turn ends on its own.
 ///
-/// An <see cref="Encounter"/> only exists while the cell still contains at
-/// least one enemy; <see cref="GameState"/> creates and discards it around that
-/// condition. Peacefulness is irrelevant here.
+/// Player turns are driven by the hub; enemy turns are driven by the tile's AI
+/// (<see cref="WorldTile.RunEnemyTurns"/>). An <see cref="Encounter"/> only
+/// exists while the cell still contains at least one enemy;
+/// <see cref="GameState"/> creates and discards it around that condition.
+/// Peacefulness is irrelevant here.
 /// </summary>
 public sealed class Encounter
 {
@@ -18,11 +19,8 @@ public sealed class Encounter
     /// <summary>Cost for stepping through a world exit.</summary>
     public const int TraverseCost = 1;
 
-    /// <summary>Cost a player pays to voluntarily skip their turn.</summary>
+    /// <summary>Cost a unit pays to voluntarily skip their turn (free once half the allowance is spent).</summary>
     public const int PassCost = 10;
-
-    /// <summary>Cost an enemy pays when it passes (does nothing).</summary>
-    public const int EnemyPassCost = 10;
 
     /// <summary>
     /// How much a unit may spend during a single turn. Reaching it ends the
@@ -76,11 +74,28 @@ public sealed class Encounter
         get { lock (_lock) return _order.Any(s => !s.IsEnemy); }
     }
 
+    /// <summary>The unit whose turn is open, if any. Opens the next turn lazily.</summary>
+    public Unit? ActiveUnit
+    {
+        get { lock (_lock) { EnsureActiveLocked(); return _active?.Unit; } }
+    }
+
+    /// <summary>True while <paramref name="unit"/> is the one whose turn is open.</summary>
+    public bool IsActive(Unit unit)
+    {
+        lock (_lock)
+        {
+            EnsureActiveLocked();
+            return _active != null && ReferenceEquals(_active.Unit, unit);
+        }
+    }
+
     /// <summary>
     /// Seats every unit currently in the cell and rolls initiative. Each rolls
     /// a D20; ties are broken by a re-roll that only orders the tied units —
     /// their counters (and so their place versus everyone else) are unchanged.
-    /// Enemies that end up first are auto-passed.
+    /// Whoever ends up first becomes the open turn; if that is an enemy, the
+    /// tile's AI resolves it before any player may act.
     /// </summary>
     public void Start(IEnumerable<Unit> units)
     {
@@ -127,8 +142,9 @@ public sealed class Encounter
     }
 
     /// <summary>
-    /// True when <paramref name="unit"/> may act right now. Enemy turns are
-    /// auto-passed first, so a player never has to wait on one.
+    /// True when <paramref name="unit"/> may act right now. Pending enemy turns
+    /// are resolved by the hub before a player is allowed to act, so this only
+    /// has to compare against the currently open turn.
     /// </summary>
     public bool TryValidateTurn(Unit unit, out string? error)
     {
@@ -274,32 +290,17 @@ public sealed class Encounter
         _order.Count == 0 ? 0 : _order.Min(s => s.Counter);
 
     /// <summary>
-    /// Opens a turn for the lowest unit on the timeline, auto-passing any enemy
-    /// that comes up first (enemies do nothing, paying
-    /// <see cref="EnemyPassCost"/>). Idempotent while a player's turn is open.
+    /// Opens a turn for the lowest unit on the timeline. Enemies are left as the
+    /// active actor for the tile's AI to resolve; players are left for the hub.
+    /// Idempotent while a turn is already open.
     /// </summary>
     private void EnsureActiveLocked()
     {
-        bool hasPlayer = _order.Any(s => !s.IsEnemy);
-        int guard = 0;
-        while (guard++ < 10_000)
-        {
-            if (_active == null)
-            {
-                var current = CurrentLocked();
-                if (current == null) return;
-                _active = current;
-                _active.Spent = 0;
-            }
-
-            if (!_active.IsEnemy) return;
-            if (!hasPlayer) return;
-
-            // Enemy turn: it does nothing, paying the pass cost.
-            _active.Counter += EnemyPassCost;
-            _active.Spent = 0;
-            _active = null;
-        }
+        if (_active != null) return;
+        var current = CurrentLocked();
+        if (current == null) return;
+        _active = current;
+        _active.Spent = 0;
     }
 
     private static int RollD20() => Random.Shared.Next(1, 21);

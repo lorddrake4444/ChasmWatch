@@ -7,6 +7,7 @@ public class GameHub : Hub
     private readonly GameState _state;
     private readonly IPlayerService _playerService;
     private readonly ObjectiveService _objectives;
+    private readonly Random _rand = new();
 
     public GameHub(GameState state, IPlayerService playerService, ObjectiveService objectives)
     {
@@ -205,6 +206,7 @@ public class GameHub : Hub
                         await SendQuestState(player);
                     }
                     break;
+                case ObjectiveService.InteractOutcome.EnemyHit:
                 case ObjectiveService.InteractOutcome.EnemyKilled:
                     await Clients.Group(roomName).SendAsync("ReceiveMessage", "System", $"{username}: {result.Message}");
                     if (tile != null)
@@ -217,6 +219,7 @@ public class GameHub : Hub
 
             // A real interaction (quest item or attack) consumes 5 from the turn counter.
             if (result.Outcome is ObjectiveService.InteractOutcome.Completed
+                or ObjectiveService.InteractOutcome.EnemyHit
                 or ObjectiveService.InteractOutcome.EnemyKilled)
                 tile?.Encounter?.ApplyCost(playerUnit, Encounter.InteractCost);
 
@@ -324,21 +327,48 @@ public class GameHub : Hub
             b.Interactable,
             OccupantKind = b.Occupant is Enemy ? "enemy" : b.Occupant != null ? "player" : "none",
             OccupantName = b.Occupant?.Name,
+            OccupantHealth = (b.Occupant as Unit)?.Health,
             WorldExitDirection = b.WorldExitDirection?.ToString(),
             Exits = b.exits.ToDictionary(e => e.Key.ToString(), e => e.Value),
         });
 
     /// <summary>
     /// Pushes the cell's turn order to everyone in it (active: false when the
-    /// cell is no longer in turn combat).
+    /// cell is no longer in turn combat). Pending enemy turns are resolved
+    /// first, so the state always lands on a player's turn or the end of combat.
     /// </summary>
     private async Task BroadcastTurnState(WorldTile tile)
     {
+        await ResolveEnemyTurns(tile);
+
         Encounter? encounter = tile.Encounter;
         TurnState state = encounter != null
             ? encounter.BuildState()
             : new TurnState(false, 0, Encounter.Allowance, null, null, Array.Empty<TurnSlotState>());
         await Clients.Group(tile.Position.ToString()).SendAsync("TurnState", state);
+    }
+
+    /// <summary>
+    /// Runs every enemy turn pending on the tile, narrates what happened, and
+    /// refreshes the board. A player reduced to 0 HP is pulled out of combat and
+    /// restored so they can rejoin.
+    /// </summary>
+    private async Task ResolveEnemyTurns(WorldTile tile)
+    {
+        EnemyTurnsResult result = tile.RunEnemyTurns(_rand);
+        string room = tile.Position.ToString();
+
+        foreach (string ev in result.Events)
+            await Clients.Group(room).SendAsync("ReceiveMessage", "System", ev);
+
+        foreach (Unit dead in result.Slain)
+        {
+            dead.Health = Unit.PlayerHealth;
+            await Clients.Group(room).SendAsync("ReceiveMessage", "System", $"{dead.Name} is defeated and pulled back to recover.");
+        }
+
+        if (result.Changed)
+            await Clients.Group(room).SendAsync("ReceiveTileInfo", BuildBoardDto(tile), (object?)null);
     }
 
     /// <summary>Tells the caller their action was refused because it is not their turn.</summary>

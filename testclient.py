@@ -228,8 +228,9 @@ class HexBoard(tk.Canvas):
                     cx, cy, text="!", fill=GOLD2,
                     font=("Courier New", fsz, "bold"))
             elif tile.get("occupantKind") == "enemy":
+                hp = tile.get("occupantHealth", tile.get("OccupantHealth"))
                 self.text_items[key] = self.create_text(
-                    cx, cy, text="x", fill=DANGER2,
+                    cx, cy, text=(str(hp) if hp is not None else "x"), fill=DANGER2,
                     font=("Courier New", fsz, "bold"))
             elif is_player:
                 self.text_items[key] = self.create_text(
@@ -521,6 +522,9 @@ class App(tk.Tk):
         self.completed_lbl = tk.Label(side, text="completed: 0",
                                       font=("Courier New",8), fg=TEXT_DIM, bg=BG2)
         self.completed_lbl.pack(anchor="w", padx=10, pady=(0,4))
+        self.health_lbl = tk.Label(side, text="HP --",
+                                   font=("Courier New",8,"bold"), fg=DANGER2, bg=BG2)
+        self.health_lbl.pack(anchor="w", padx=10, pady=(0,4))
         self.turn_lbl = tk.Label(side, text="", font=("Courier New",8), fg=TEXT_DIM,
                                  bg=BG2, wraplength=280, justify="left")
         self.turn_lbl.pack(anchor="w", padx=10, pady=(0,4))
@@ -697,6 +701,7 @@ class App(tk.Tk):
             if tile_pos is not None and tile_pos != self.current_tile_pos:
                 self._enter_tile_context(*tile_pos, status="traveling...")
             self.board.load_board(board, player_pos=board_pos)
+            self._update_health(board_pos)
             n = len(board) if isinstance(board, list) else 0
             standing_on = self.board.tiles.get(board_pos, {}) if board_pos else {}
             hints = []
@@ -712,8 +717,23 @@ class App(tk.Tk):
             # Another player's update (or legacy payload): keep our own marker.
             keep = getattr(getattr(self, "board", None), "player_pos", None)
             self.board.load_board(board, player_pos=keep)
+            self._update_health(keep)
             n = len(board) if isinstance(board, list) else 0
             self.status_lbl.config(text=f"+ {n} tiles", fg=ACCENT2)
+
+    def _update_health(self, board_pos):
+        if not hasattr(self, "health_lbl"):
+            return
+        hp = None
+        if board_pos and hasattr(self, "board"):
+            tile = self.board.tiles.get(board_pos)
+            if tile:
+                hp = tile.get("occupantHealth", tile.get("OccupantHealth"))
+        if hp is None:
+            self.health_lbl.config(text="HP --", fg=TEXT_DIM)
+        else:
+            self.health_lbl.config(text=f"HP {hp}",
+                                   fg=ACCENT3 if hp > 10 else DANGER2)
 
     def _enemy_adjacent(self, board_pos):
         if not board_pos or not hasattr(self, "board"):

@@ -33,6 +33,9 @@ public class WorldTile
 
     private readonly object _encounterLock = new();
 
+    /// <summary>Serialises whole-turn enemy resolution so it can't interleave.</summary>
+    private readonly object _aiLock = new();
+
     /// <summary>
     /// Live turn-based encounter for this cell, or null when the cell is not in
     /// turn-based combat. Combat runs only while enemies exist; managed by
@@ -731,12 +734,14 @@ public class WorldTile
     }
 
     /// <summary>
-    /// Kills (deletes) the first enemy on a hex neighboring <paramref name="unit"/>.
-    /// The tile persists in memory, so the kill is permanent for late joiners.
-    /// Returns the slain enemy, or null when no enemy is adjacent.
+    /// Damages the first enemy on a hex neighboring <paramref name="unit"/>.
+    /// Returns the target (null when no enemy is adjacent) and reports whether
+    /// the blow was fatal; a dead enemy is cleared off its hex. The tile
+    /// persists in memory, so the kill is permanent for late joiners.
     /// </summary>
-    public Enemy? TryKillAdjacentEnemy(Unit unit)
+    public Enemy? HitAdjacentEnemy(Unit unit, int damage, out bool killed)
     {
+        killed = false;
         _lock.EnterWriteLock();
         try
         {
@@ -747,8 +752,13 @@ public class WorldTile
                 if (Board.TryGetValue(neighborPos, out var neighbor)
                     && neighbor.Occupant is Enemy enemy)
                 {
-                    neighbor.Occupant = null;
-                    neighbor.Occupied = false;
+                    enemy.Health -= damage;
+                    if (enemy.Health <= 0)
+                    {
+                        neighbor.Occupant = null;
+                        neighbor.Occupied = false;
+                        killed = true;
+                    }
                     return enemy;
                 }
             }
@@ -771,6 +781,206 @@ public class WorldTile
         }
         finally { _lock.ExitReadLock(); }
     }
+
+    /// <summary>Players standing on a hex neighboring <paramref name="unit"/>.</summary>
+    public List<Unit> GetAdjacentPlayers(Unit unit)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            var result = new List<Unit>();
+            var standing = FindOccupiedTileNoLock(unit);
+            if (standing == null) return result;
+            foreach (var neighborPos in HexagonalPos.GetNeighbors(standing.Position))
+            {
+                if (Board.TryGetValue(neighborPos, out var neighbor)
+                    && neighbor.Occupant is Unit other && other is not Enemy)
+                {
+                    result.Add(other);
+                }
+            }
+            return result;
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Nearest player to <paramref name="unit"/> by walkable distance, or null
+    /// when none is reachable. Occupied hexes (including other enemies) block
+    /// the search, so this is the closest player it could actually reach.
+    /// </summary>
+    public Unit? GetNearestPlayer(Unit unit)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            var start = FindOccupiedTileNoLock(unit)?.Position;
+            if (start == null) return null;
+            var visited = new HashSet<HexagonalPos> { start };
+            var frontier = new Queue<HexagonalPos>();
+            frontier.Enqueue(start);
+            while (frontier.Count > 0)
+            {
+                var pos = frontier.Dequeue();
+                foreach (var neighbor in HexagonalPos.GetNeighbors(pos))
+                {
+                    if (!Board.TryGetValue(neighbor, out var tile)) continue;
+                    if (tile.Occupant is Unit other && other is not Enemy && !ReferenceEquals(other, unit))
+                        return other;
+                    if (tile.Pathable && !tile.Occupied && visited.Add(neighbor))
+                        frontier.Enqueue(neighbor);
+                }
+            }
+            return null;
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Walks <paramref name="unit"/> up to <paramref name="maxSteps"/> cells
+    /// along the shortest walkable route toward <paramref name="target"/>,
+    /// stopping on the closest reachable hex. <paramref name="steps"/> receives
+    /// the cells actually crossed. False when no closer hex is reachable
+    /// (already adjacent, or hemmed in).
+    /// </summary>
+    public bool TryMoveToward(Unit unit, HexagonalPos target, int maxSteps, out int steps)
+    {
+        steps = 0;
+        _lock.EnterWriteLock();
+        try
+        {
+            var startTile = FindOccupiedTileNoLock(unit);
+            if (startTile == null) return false;
+            var start = startTile.Position;
+
+            var dist = new Dictionary<HexagonalPos, int> { [start] = 0 };
+            var frontier = new Queue<HexagonalPos>();
+            frontier.Enqueue(start);
+
+            HexagonalPos best = start;
+            int bestTargetDist = HexagonalPos.HexDistance(start, target);
+            int bestSteps = 0;
+
+            while (frontier.Count > 0)
+            {
+                var pos = frontier.Dequeue();
+                int d = dist[pos];
+                int targetDist = HexagonalPos.HexDistance(pos, target);
+                if (d > 0 && (targetDist < bestTargetDist
+                              || (targetDist == bestTargetDist && d < bestSteps)))
+                {
+                    best = pos;
+                    bestTargetDist = targetDist;
+                    bestSteps = d;
+                }
+
+                if (d >= maxSteps) continue;
+                foreach (var neighbor in HexagonalPos.GetNeighbors(pos))
+                {
+                    if (dist.ContainsKey(neighbor)) continue;
+                    if (!Board.TryGetValue(neighbor, out var tile) || !tile.Pathable || tile.Occupied)
+                        continue;
+                    dist[neighbor] = d + 1;
+                    frontier.Enqueue(neighbor);
+                }
+            }
+
+            if (bestSteps == 0) return false;
+
+            startTile.Occupant = null;
+            startTile.Occupied = false;
+            var destination = Board[best];
+            destination.Occupant = unit;
+            destination.Occupied = true;
+            unit.CurrentBoardPos = destination.Position.Copy();
+            steps = bestSteps;
+            return true;
+        }
+        finally { _lock.ExitWriteLock(); }
+    }
+
+    /// <summary>
+    /// Resolves every enemy turn pending on this tile. Each enemy spends its
+    /// allowance: attack an adjacent player (1d2, chosen at random when several
+    /// are adjacent), otherwise step toward the nearest one; when it can do
+    /// neither it passes. Runs synchronously under a dedicated lock so
+    /// concurrent player actions cannot interleave two enemy turns.
+    /// </summary>
+    public EnemyTurnsResult RunEnemyTurns(Random rand)
+    {
+        var events = new List<string>();
+        var slain = new List<Unit>();
+        bool changed = false;
+
+        lock (_aiLock)
+        {
+            int guard = 0;
+            while (guard++ < 100 && Encounter is { } encounter && encounter.ActiveUnit is Enemy enemy)
+            {
+                var turn = RunEnemyTurn(encounter, enemy, rand);
+                events.AddRange(turn.Events);
+                slain.AddRange(turn.Slain);
+                changed |= turn.Changed;
+            }
+        }
+
+        return new EnemyTurnsResult(events, slain, changed);
+    }
+
+    private EnemyTurnResult RunEnemyTurn(Encounter encounter, Enemy enemy, Random rand)
+    {
+        var events = new List<string>();
+        var slain = new List<Unit>();
+        bool changed = false;
+
+        int guard = 0;
+        while (guard++ < 100 && encounter.IsActive(enemy))
+        {
+            // Adjacent player? Attack one at random.
+            var targets = GetAdjacentPlayers(enemy);
+            if (targets.Count > 0)
+            {
+                Unit target = targets[rand.Next(targets.Count)];
+                int damage = enemy.RollAttackDamage(rand);
+                target.Health -= damage;
+                encounter.ApplyCost(enemy, Encounter.InteractCost);
+                events.Add($"{enemy.Name} strikes {target.Name} for {damage}.");
+                changed = true;
+                if (target.Health <= 0)
+                {
+                    RemoveUnit(target);
+                    RemoveFromEncounter(target);
+                    slain.Add(target);
+                    events.Add($"{target.Name} falls.");
+                }
+                continue;
+            }
+
+            // Otherwise close the distance.
+            Unit? prey = GetNearestPlayer(enemy);
+            if (prey == null) { encounter.Pass(enemy); break; }
+
+            int speed = Math.Max(1, enemy.Speed);
+            if (TryMoveToward(enemy, prey.CurrentBoardPos, speed, out int steps) && steps > 0)
+            {
+                encounter.ApplyCost(enemy, steps);
+                events.Add($"{enemy.Name} advances {steps}.");
+                changed = true;
+                continue;
+            }
+
+            // Nothing useful left to do this turn.
+            encounter.Pass(enemy);
+            break;
+        }
+
+        return new EnemyTurnResult(events, slain, changed);
+    }
+
+    private sealed record EnemyTurnResult(
+        IReadOnlyList<string> Events,
+        IReadOnlyList<Unit> Slain,
+        bool Changed);
 
     private BoardTile? FindOccupiedTileNoLock(Unit unit)
     {
@@ -847,3 +1057,9 @@ public class WorldTile
         return false;
     }
 }
+
+/// <summary>Result of resolving every enemy turn pending on a tile.</summary>
+public sealed record EnemyTurnsResult(
+    IReadOnlyList<string> Events,
+    IReadOnlyList<Unit> Slain,
+    bool Changed);

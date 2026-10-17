@@ -71,7 +71,7 @@ public class PlayerService : IPlayerService
 
     private static void EnsureActiveChar(Player player)
     {
-        player.ActiveChar ??= new Unit(health: 100, speed: 3)
+        player.ActiveChar ??= new Unit
         {
             Name = player.UserName,
         };

@@ -90,6 +90,7 @@ public class ObjectiveService
         NothingHere,
         NotYours,
         Completed,
+        EnemyHit,
         EnemyKilled,
     }
 
@@ -97,9 +98,10 @@ public class ObjectiveService
 
     /// <summary>
     /// Generic positional interaction. Quest hexes take priority; otherwise an
-    /// adjacent enemy is killed (deleted). Only the objective owner can complete
-    /// their objective; completion clears the flag, increments the counter, and
-    /// starts the next quest from the player's current position.
+    /// adjacent enemy takes 1d4 damage (and dies at 0 HP). Only the objective
+    /// owner can complete their objective; completion clears the flag,
+    /// increments the counter, and starts the next quest from the player's
+    /// current position.
     /// </summary>
     public InteractResult Interact(Player player, Unit unit, HexagonalPos claimedWorldPos)
     {
@@ -111,13 +113,16 @@ public class ObjectiveService
 
         if (!tile.IsOnInteractable(unit))
         {
-            Enemy? slain = tile.TryKillAdjacentEnemy(unit);
-            if (slain != null)
+            int damage = unit.RollAttackDamage(_rand);
+            Enemy? target = tile.HitAdjacentEnemy(unit, damage, out bool killed);
+            if (target == null)
+                return new InteractResult(InteractOutcome.NothingHere, "Nothing to interact with here.");
+            if (killed)
             {
-                tile.RemoveFromEncounter(slain);
-                return new InteractResult(InteractOutcome.EnemyKilled, $"{slain.Name} destroyed. ({tile.CountEnemies()} remain on this tile.)");
+                tile.RemoveFromEncounter(target);
+                return new InteractResult(InteractOutcome.EnemyKilled, $"{target.Name} destroyed by {damage} damage. ({tile.CountEnemies()} remain on this tile.)");
             }
-            return new InteractResult(InteractOutcome.NothingHere, "Nothing to interact with here.");
+            return new InteractResult(InteractOutcome.EnemyHit, $"{target.Name} takes {damage} damage. ({target.Health} HP left.)");
         }
 
         Objective? objective = player.ActiveObjective;
