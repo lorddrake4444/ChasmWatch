@@ -7,8 +7,14 @@ public class WorldMap
     private readonly List<BiomeRegion> RegionRules = new();
     private readonly Dictionary<string, Biome> Biomes = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Fallback biome for tiles without a biome override or region match.</summary>
-    public Biome DefaultBiome { get; set; } = new Biome("Default");
+    /// <summary>
+    /// Fallback biome for tiles without a biome override or region match.
+    /// Roughly 1 in 10 default tiles rolls rotten, lifting the enemy cap there.
+    /// </summary>
+    public Biome DefaultBiome { get; set; } = new Biome("Default", new SpawnSettings
+    {
+        RottenTileChance = 0.1,
+    });
 
     /// <summary>
     /// Deep-south biome: tight enclosed corridors, fewer enemies. Applies to

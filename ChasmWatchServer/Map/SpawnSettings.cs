@@ -10,6 +10,15 @@ public class SpawnSettings
     public int MaxEnemies { get; set; } = 8;
 
     /// <summary>
+    /// Chance that the whole world cell rolls "rotten" at generation. A
+    /// rotten tile lifts the <see cref="MaxEnemies"/> cap: per-hex spawn
+    /// chance still applies, but the population is unlimited
+    /// (<see cref="MaxEnemies"/> &lt;= 0 still disables spawning entirely).
+    /// 0 (the default) never rolls rotten.
+    /// </summary>
+    public double RottenTileChance { get; set; } = 0.0;
+
+    /// <summary>
     /// Max hexes per room site. Rooms seeded adjacently merge into open space.
     /// </summary>
     public int RoomSize { get; set; } = 100;

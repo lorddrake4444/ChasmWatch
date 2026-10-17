@@ -17,6 +17,13 @@ public class WorldTile
 
     public Dictionary<HexDirection, List<HexagonalPos>> WorldExits = new();
 
+    /// <summary>
+    /// True when generation rolled this whole world cell rotten. Every board
+    /// hex in a rotten tile is tagged <see cref="BoardTile.Rotten"/>, and the
+    /// enemy population cap is lifted (see <see cref="SpawnEnemiesDefault"/>).
+    /// </summary>
+    public bool Rotten { get; set; } = false;
+
     public WorldTile(HexagonalPos position)
     {
         this.Position = position;
@@ -32,9 +39,18 @@ public class WorldTile
         int seed = HashCode.Combine(Position.q, Position.r, Position.s, seedOverride ?? DateTime.UtcNow.Millisecond);
         Random rand = new Random(seed);
 
+        // Rotten roll: rare corrupted world cells where the enemy population
+        // cap is lifted. Tuned per biome via SpawnSettings.RottenTileChance;
+        // 0 (the default) never rolls rotten.
+        Rotten = settings.RottenTileChance > 0 && rand.NextDouble() < settings.RottenTileChance;
+
         GenerationResult result = biome.GenerateShape != null
             ? biome.GenerateShape(this, rand, settings, seed)
             : GenerateShapeDefault(rand, settings, seed);
+
+        // Tag the whole board so rot is visible per hex, not just per tile.
+        if (Rotten)
+            foreach (var tile in Board.Values) tile.Rotten = true;
 
         if (biome.PlaceWorldExits != null) biome.PlaceWorldExits(this, rand);
         else PlaceWorldExitsDefault(rand);
@@ -350,9 +366,11 @@ public class WorldTile
 
     /// <summary>
     /// Stationary enemy seeding: every board hex has a chance to spawn an
-    /// enemy, up to <see cref="SpawnSettings.MaxEnemies"/>. Exits stay clear
-    /// so traversal never strands, and the entrance stays clear so joining
-    /// never lands on an enemy.
+    /// enemy, up to <see cref="SpawnSettings.MaxEnemies"/> — unless this tile
+    /// rolled rotten, in which case the cap is lifted and only the per-hex
+    /// chance limits the population. Exits stay clear so traversal never
+    /// strands, and the entrance stays clear so joining never lands on an
+    /// enemy.
     /// </summary>
     public void SpawnEnemiesDefault(Random rand, SpawnSettings spawn)
     {
@@ -371,7 +389,9 @@ public class WorldTile
         int spawned = 0;
         foreach (var tile in candidates)
         {
-            if (spawned >= spawn.MaxEnemies) break;
+            // Rotten world tiles lift the population cap; the per-hex roll
+            // below still applies, so density is unchanged but unlimited.
+            if (!Rotten && spawned >= spawn.MaxEnemies) break;
             if (rand.NextDouble() >= spawn.EnemySpawnChance) continue;
             var enemy = new Enemy();
             enemy.CurrentTile = Position.Copy();
